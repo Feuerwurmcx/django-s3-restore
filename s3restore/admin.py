@@ -30,6 +30,7 @@ from django.contrib import admin, messages
 from django.contrib.admin.models import CHANGE, LogEntry
 from django.contrib.admin.options import get_content_type_for_model
 from django.core.exceptions import PermissionDenied, SuspiciousOperation
+from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
 from django.http import Http404, HttpResponseRedirect
 from django.shortcuts import render
 from django.urls import path, reverse
@@ -51,8 +52,9 @@ except ImportError:  # pragma: no cover
         return default_storage
 
 
-BROWSE_LIMIT = 500  # so viele Objekte zeigt die Uebersicht hoechstens
-BULK_LIMIT = 200    # so viele Dateien nimmt die Sammelaktion hoechstens entgegen
+BROWSE_LIMIT = 5000  # so viele Objekte holt die Uebersicht hoechstens aus S3
+PAGE_SIZE = 50       # Objekte pro Seite
+BULK_LIMIT = 200     # so viele Dateien nimmt die Sammelaktion hoechstens entgegen
 
 
 def versioned_aliases() -> list[str]:
@@ -120,7 +122,7 @@ class S3VersionAdmin(admin.ModelAdmin):
         alias = self._alias(request, aliases)
         prefix = request.GET.get("prefix", "").strip()
 
-        rows, truncated = [], False
+        rows, truncated, page_obj, page_links = [], False, None, []
         if alias:
             storage = _get_storage(alias)
             try:
@@ -128,7 +130,19 @@ class S3VersionAdmin(admin.ModelAdmin):
             except RestoreError as exc:
                 self.message_user(request, str(exc), messages.ERROR)
                 grouped = {}
-            for name in sorted(grouped)[:BROWSE_LIMIT]:
+
+            names = sorted(grouped)
+            truncated = len(names) > BROWSE_LIMIT
+            paginator = Paginator(names[:BROWSE_LIMIT], PAGE_SIZE)
+            try:
+                page_obj = paginator.page(request.GET.get("page") or 1)
+            except PageNotAnInteger:
+                page_obj = paginator.page(1)
+            except EmptyPage:
+                page_obj = paginator.page(paginator.num_pages)
+            page_links = self._page_links(paginator, page_obj, alias, prefix)
+
+            for name in page_obj.object_list:
                 history = grouped[name]
                 current = next((v for v in history if v.is_latest), history[0])
                 rows.append({
@@ -138,7 +152,6 @@ class S3VersionAdmin(admin.ModelAdmin):
                     "deleted": current.is_delete_marker,
                     "url": self._versions_url(alias, name),
                 })
-            truncated = len(grouped) > BROWSE_LIMIT
 
         context = {
             **self.admin_site.each_context(request),
@@ -151,6 +164,10 @@ class S3VersionAdmin(admin.ModelAdmin):
             "rows": rows,
             "truncated": truncated,
             "limit": BROWSE_LIMIT,
+            "page_obj": page_obj,
+            "page_links": page_links,
+            "page": page_obj.number if page_obj else 1,
+            "total": page_obj.paginator.count if page_obj else 0,
             "can_restore": self._can_restore(request),
             "bulk_url": reverse("admin:s3restore_s3version_bulk"),
             **(extra_context or {}),
@@ -275,7 +292,7 @@ class S3VersionAdmin(admin.ModelAdmin):
         if len(names) > BULK_LIMIT:
             raise SuspiciousOperation(f"Hoechstens {BULK_LIMIT} Dateien auf einmal.")
 
-        back_url = self._changelist_url(alias, prefix)
+        back_url = self._changelist_url(alias, prefix, request.POST.get("page"))
         if not names:
             self.message_user(request, "Keine Datei ausgewaehlt.", messages.WARNING)
             return HttpResponseRedirect(back_url)
@@ -316,6 +333,7 @@ class S3VersionAdmin(admin.ModelAdmin):
                 "alias": alias,
                 "bucket": storage.bucket_name,
                 "prefix": prefix,
+                "page": request.POST.get("page", ""),
                 "planned": planned,
                 "skipped": skipped,
                 "names": [n for n, _ in planned],
@@ -382,9 +400,29 @@ class S3VersionAdmin(admin.ModelAdmin):
                 + "?" + urlencode({"storage": alias, "name": name}))
 
     @staticmethod
-    def _changelist_url(alias: str, prefix: str = "") -> str:
-        return (reverse("admin:s3restore_s3version_changelist")
-                + "?" + urlencode({"storage": alias, "prefix": prefix}))
+    def _changelist_url(alias: str, prefix: str = "", page: int | str | None = None) -> str:
+        params = {"storage": alias, "prefix": prefix}
+        if page and str(page) != "1":
+            params["page"] = page
+        return (reverse("admin:s3restore_s3version_changelist") + "?" + urlencode(params))
+
+    @classmethod
+    def _page_links(cls, paginator, page_obj, alias, prefix) -> list[dict]:
+        """Seitenzahlen fuer die Blaetter-Leiste; None = Auslassung (…)."""
+        if paginator.num_pages <= 1:
+            return []
+        links = []
+        for number in paginator.get_elided_page_range(page_obj.number,
+                                                      on_each_side=2, on_ends=1):
+            if number == paginator.ELLIPSIS:
+                links.append({"number": None})
+            else:
+                links.append({
+                    "number": number,
+                    "current": number == page_obj.number,
+                    "url": cls._changelist_url(alias, prefix, number),
+                })
+        return links
 
     def _log(self, request, alias, name, target):
         """Wiederherstellung in der Admin-Historie festhalten."""

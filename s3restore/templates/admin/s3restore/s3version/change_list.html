@@ -45,6 +45,7 @@
       {% csrf_token %}
       <input type="hidden" name="storage" value="{{ alias }}">
       <input type="hidden" name="prefix" value="{{ prefix }}">
+      <input type="hidden" name="page" value="{{ page }}">
 
       {% if can_restore %}
         <div class="actions">
@@ -54,6 +55,9 @@
           </select>
           <button type="submit" class="button" id="run-action" disabled>Ausfuehren</button>
           <span class="action-counter" id="action-counter" style="margin-left:8px;"></span>
+          {% if page_obj.paginator.num_pages > 1 %}
+            <span class="help" style="margin-left:8px;">Die Auswahl gilt nur fuer diese Seite.</span>
+          {% endif %}
         </div>
       {% endif %}
 
@@ -95,10 +99,23 @@
           </tbody>
         </table>
       </div>
+      <p class="paginator">
+        {% for link in page_links %}
+          {% if not link.number %}
+            <span class="disabled">&hellip;</span>
+          {% elif link.current %}
+            <span class="this-page">{{ link.number }}</span>
+          {% else %}
+            <a href="{{ link.url }}">{{ link.number }}</a>
+          {% endif %}
+        {% endfor %}
+        {{ total }} Objekt{{ total|pluralize:"e" }}{% if page_obj.paginator.num_pages > 1 %}
+          &middot; Seite {{ page_obj.number }} von {{ page_obj.paginator.num_pages }}{% endif %}
+      </p>
     </form>
 
     {% if truncated %}
-      <p class="help">Es werden nur die ersten {{ limit }} Objekte angezeigt &ndash;
+      <p class="help">Es werden nur die ersten {{ limit }} Objekte beruecksichtigt &ndash;
         grenze den Praefix weiter ein.</p>
     {% endif %}
     {% if not can_restore %}

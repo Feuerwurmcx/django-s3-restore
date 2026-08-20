@@ -76,4 +76,15 @@ def test_make_screenshots(live_server):
             page.screenshot(path=f"{IMG}/erfolg.png", full_page=True)
             assert "zurueckgesetzt" in page.content()
 
+            # 5: Blaettern -- 120 Dateien unter einem zweiten Praefix
+            for i in range(120):
+                st.s3_client.put_object(Bucket=BUCKET,
+                                        Key=st.key_for(f"logs/lauf-{i:03d}.txt"),
+                                        Body=b"x")
+            page.goto(f"{live_server.url}/admin/s3restore/s3version/?prefix=logs/&page=2")
+            page.wait_for_load_state("networkidle")
+            page.locator("p.paginator").scroll_into_view_if_needed()
+            page.wait_for_timeout(200)
+            page.screenshot(path=f"{IMG}/pagination.png")
+
             browser.close()

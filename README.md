@@ -65,6 +65,18 @@ Ablauf: Präfix durchsuchen → Objekt anklicken → Version wählen → bestät
 
 ![Übersicht](docs/img/uebersicht.png)
 
+### Blättern
+
+Die Liste ist auf **50 Objekte pro Seite** paginiert (`PAGE_SIZE` in `admin.py`),
+mit Seitenzahlen im Admin-Look und Gesamtzahl:
+
+![Pagination](docs/img/pagination.png)
+
+Aus S3 werden dabei höchstens `BROWSE_LIMIT` (5000) Objekte eingesammelt – darüber
+erscheint der Hinweis, den Präfix weiter einzugrenzen. Die Checkbox-Auswahl gilt
+immer nur für die aktuelle Seite; nach einer Sammelaktion landest du wieder auf
+derselben Seite.
+
 ### Sammelaktion
 
 Jede Zeile hat eine Checkbox (inklusive „alles auswählen" im Tabellenkopf). Mit der
@@ -160,7 +172,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-72 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
+81 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
 S3-Bucket – kein echtes AWS, keine Credentials nötig.
 
 Die Screenshots oben stammen aus einem Playwright-Durchlauf gegen genau diesen

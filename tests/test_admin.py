@@ -340,3 +340,85 @@ def test_bulk_needs_restore_permission(storage, client, db):
                               "confirm": "yes", "names": ["config/a.json"]})
     assert resp.status_code == 403
     assert read(storage, "config/a.json") == "a-neu"
+
+
+# --------------------------------------------------------------- Pagination
+
+@pytest.fixture
+def many_files(storage):
+    """120 Objekte mit je einer Version -- schnell per put_object, ohne sleep."""
+    for i in range(120):
+        storage.s3_client.put_object(
+            Bucket=BUCKET, Key=storage.key_for(f"config/datei-{i:03d}.txt"),
+            Body=b"x")
+    return storage
+
+
+def test_first_page_shows_page_size_rows(many_files, admin_client):
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    assert body.count('name="names"') == 50
+    assert "config/datei-000.txt" in body
+    assert "config/datei-050.txt" not in body
+    assert "120 Objekte" in body and "Seite 1 von 3" in body
+
+
+def test_second_page_shows_next_slice(many_files, admin_client):
+    body = admin_client.get(CHANGELIST, {"prefix": "config/", "page": 2}).content.decode()
+    assert "config/datei-050.txt" in body
+    assert "config/datei-000.txt" not in body
+    assert "Seite 2 von 3" in body
+
+
+def test_last_page_shows_remainder(many_files, admin_client):
+    body = admin_client.get(CHANGELIST, {"prefix": "config/", "page": 3}).content.decode()
+    assert body.count('name="names"') == 20
+    assert "config/datei-119.txt" in body
+
+
+def test_page_links_are_rendered(many_files, admin_client):
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    assert "page=2" in body and "page=3" in body
+    assert 'class="this-page"' in body
+
+
+def test_invalid_page_falls_back(many_files, admin_client):
+    assert "Seite 1 von 3" in admin_client.get(
+        CHANGELIST, {"prefix": "config/", "page": "abc"}).content.decode()
+    assert "Seite 3 von 3" in admin_client.get(
+        CHANGELIST, {"prefix": "config/", "page": 99}).content.decode()
+
+
+def test_no_paginator_bar_for_single_page(storage, admin_client):
+    put(storage, "v1", "config/a.json")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    assert "1 Objekt" in body
+    assert "Seite 1 von" not in body
+    assert 'class="this-page"' not in body
+
+
+def test_selection_hint_only_when_paginated(many_files, admin_client, storage):
+    many = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    assert "Auswahl gilt nur fuer diese Seite" in many
+
+
+def test_bulk_returns_to_same_page(many_files, admin_client):
+    storage = many_files
+    # zweite Version fuer eine Datei auf Seite 2 anlegen
+    time.sleep(1.05)
+    storage.s3_client.put_object(Bucket=BUCKET,
+                                 Key=storage.key_for("config/datei-050.txt"), Body=b"neu")
+    resp = admin_client.post(BULK, {
+        "storage": "default", "prefix": "config/", "page": "2",
+        "action": "restore_previous", "confirm": "yes",
+        "names": ["config/datei-050.txt"]})
+    assert resp.status_code == 302
+    assert "page=2" in resp["Location"] and "prefix=config" in resp["Location"]
+    assert read(storage, "config/datei-050.txt") == "x"
+
+
+def test_bulk_confirmation_keeps_page(many_files, admin_client):
+    body = admin_client.post(BULK, {
+        "storage": "default", "prefix": "config/", "page": "2",
+        "action": "restore_previous",
+        "names": ["config/datei-050.txt"]}).content.decode()
+    assert '<input type="hidden" name="page" value="2">' in body
