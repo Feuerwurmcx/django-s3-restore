@@ -1,0 +1,81 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Start</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; S3-Wiederherstellung
+  </div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+
+  {% if not aliases %}
+    <p class="errornote">
+      Kein Storage in <code>settings.STORAGES</code> benutzt
+      <code>s3restore.storage.VersionedS3Storage</code>.
+    </p>
+  {% else %}
+
+  <div class="module" id="changelist-filter-form" style="padding:10px 12px;margin-bottom:14px;">
+    <form method="get">
+      <label for="id_storage" style="margin-right:6px;">Storage</label>
+      <select name="storage" id="id_storage">
+        {% for a in aliases %}
+          <option value="{{ a }}" {% if a == alias %}selected{% endif %}>{{ a }}</option>
+        {% endfor %}
+      </select>
+
+      <label for="id_prefix" style="margin:0 6px 0 16px;">Praefix</label>
+      <input type="text" name="prefix" id="id_prefix" value="{{ prefix }}"
+             size="40" placeholder="z.B. config/  (leer = alles)">
+
+      <input type="submit" value="Anzeigen" class="default" style="margin-left:8px;">
+    </form>
+    <p class="help" style="margin:8px 0 0;">
+      Bucket <code>{{ bucket }}</code> &middot; es wird nichts geaendert, solange du
+      keine Version ausdruecklich wiederherstellst.
+    </p>
+  </div>
+
+  {% if rows %}
+    <div class="results">
+      <table id="result_list">
+        <thead>
+          <tr>
+            <th scope="col">Objekt</th>
+            <th scope="col">Aktueller Stand</th>
+            <th scope="col">Groesse</th>
+            <th scope="col">Versionen</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr class="{% cycle 'row1' 'row2' %}">
+              <th scope="row"><a href="{{ row.url }}">{{ row.name }}</a></th>
+              <td>
+                {{ row.current.last_modified|date:"d.m.Y H:i:s" }}
+                {% if row.deleted %}
+                  <span style="color:#ba2121;font-weight:600;">&nbsp;geloescht</span>
+                {% endif %}
+              </td>
+              <td>{% if row.deleted %}&mdash;{% else %}{{ row.current.size|filesizeformat }}{% endif %}</td>
+              <td>{{ row.count }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if truncated %}
+      <p class="help">Es werden nur die ersten {{ limit }} Objekte angezeigt &ndash;
+        grenze den Praefix weiter ein.</p>
+    {% endif %}
+  {% else %}
+    <p class="help">Keine Objekte unter diesem Praefix gefunden.</p>
+  {% endif %}
+
+  {% endif %}
+</div>
+{% endblock %}

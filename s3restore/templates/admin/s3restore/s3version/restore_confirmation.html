@@ -1,0 +1,38 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Start</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{{ back_url }}">{{ name }}</a>
+    &rsaquo; Wiederherstellen
+  </div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+  <p>
+    <code>s3://{{ bucket }}/{{ name }}</code> wird auf den Stand vom
+    <b>{{ target.last_modified|date:"d.m.Y H:i:s" }}</b>
+    ({{ target.size|filesizeformat }}, Version <code>{{ target.version_id }}</code>)
+    zurueckgesetzt.
+  </p>
+  <p class="help">
+    Die alte Version wird dabei erneut hochgeladen und zur neuen aktuellen Version.
+    Der bisherige Stand bleibt als Version erhalten und kann genauso zurueckgeholt
+    werden.
+  </p>
+
+  <form method="post" action="{{ restore_url }}">
+    {% csrf_token %}
+    <input type="hidden" name="storage" value="{{ alias }}">
+    <input type="hidden" name="name" value="{{ name }}">
+    <input type="hidden" name="version_id" value="{{ target.version_id }}">
+    <input type="hidden" name="confirm" value="yes">
+    <div class="submit-row">
+      <input type="submit" value="Ja, wiederherstellen" class="default">
+      <a href="{{ back_url }}" class="closelink">Abbrechen</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

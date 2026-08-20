@@ -1,0 +1,84 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Start</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{{ changelist_url }}">S3-Wiederherstellung</a>
+    &rsaquo; {{ name }}
+  </div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+
+  <p class="help">
+    <code>s3://{{ bucket }}/{{ name }}</code> &middot; Storage <code>{{ alias }}</code><br>
+    Beim Wiederherstellen wird die gewaehlte Version erneut geschrieben und damit
+    zur aktuellen. Nichts wird geloescht &ndash; die Historie bleibt vollstaendig.
+  </p>
+
+  <form method="post" action="{{ restore_url }}">
+    {% csrf_token %}
+    <input type="hidden" name="storage" value="{{ alias }}">
+    <input type="hidden" name="name" value="{{ name }}">
+
+    <div class="results">
+      <table id="result_list">
+        <thead>
+          <tr>
+            <th scope="col">&nbsp;</th>
+            <th scope="col">Zeitpunkt</th>
+            <th scope="col">Groesse</th>
+            <th scope="col">Version</th>
+            <th scope="col">Ansehen</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+            <tr class="{% cycle 'row1' 'row2' %}">
+              <td>
+                {% if can_restore and not row.version.is_latest and not row.version.is_delete_marker %}
+                  <input type="radio" name="version_id" value="{{ row.version.version_id }}"
+                         id="v{{ forloop.counter }}" {% if forloop.counter == 2 %}checked{% endif %}>
+                {% endif %}
+              </td>
+              <th scope="row">
+                <label for="v{{ forloop.counter }}">
+                  {{ row.version.last_modified|date:"d.m.Y H:i:s" }}
+                </label>
+                {% if row.version.is_latest %}
+                  <span style="color:#417690;font-weight:600;">&nbsp;aktuell</span>
+                {% endif %}
+              </th>
+              <td>
+                {% if row.version.is_delete_marker %}
+                  <span style="color:#ba2121;">Delete-Marker</span>
+                {% else %}
+                  {{ row.version.size|filesizeformat }}
+                {% endif %}
+              </td>
+              <td><code style="font-size:11px;">{{ row.version.version_id }}</code></td>
+              <td>
+                {% if row.download %}
+                  <a href="{{ row.download }}" target="_blank" rel="noopener">oeffnen</a>
+                {% else %}&mdash;{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% if can_restore %}
+      <div class="submit-row">
+        <input type="submit" value="Ausgewaehlte Version wiederherstellen" class="default">
+        <a href="{{ changelist_url }}" class="closelink">Zurueck</a>
+      </div>
+    {% else %}
+      <p class="help">Dir fehlt das Recht <code>s3restore.restore_s3version</code>
+        &ndash; nur Ansicht.</p>
+    {% endif %}
+  </form>
+</div>
+{% endblock %}

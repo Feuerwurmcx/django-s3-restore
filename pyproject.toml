@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "django-s3-restore"
+version = "0.1.0"
+description = "Fruehere Versionen aus einem versionierten S3-Bucket wiederherstellen -- Django-Admin, Management-Command und Standalone-Script."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "Django>=4.2",
+    "django-storages>=1.14",
+    "boto3>=1.28",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-django>=4.7",
+    "moto[s3]>=5.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["s3restore*"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "standalone"]
+testpaths = ["tests"]
