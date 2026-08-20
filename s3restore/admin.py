@@ -30,7 +30,6 @@ from django.contrib import admin, messages
 from django.contrib.admin.models import CHANGE, LogEntry
 from django.contrib.admin.options import get_content_type_for_model
 from django.core.exceptions import PermissionDenied, SuspiciousOperation
-from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
 from django.http import Http404, HttpResponseRedirect
 from django.shortcuts import render
 from django.urls import path, reverse
@@ -52,9 +51,10 @@ except ImportError:  # pragma: no cover
         return default_storage
 
 
-BROWSE_LIMIT = 5000  # so viele Objekte holt die Uebersicht hoechstens aus S3
-PAGE_SIZE = 50       # Objekte pro Seite
+PAGE_SIZE = 50       # Objekte pro Seite (ein S3-Batch ab dem KeyMarker)
 BULK_LIMIT = 200     # so viele Dateien nimmt die Sammelaktion hoechstens entgegen
+SESSION_KEY = "s3restore_markers"   # Kette der Seiten-Startmarker je Praefix
+MARKER_STACK_LIMIT = 500            # so viele Seiten merkt sich die Session
 
 
 def versioned_aliases() -> list[str]:
@@ -122,28 +122,20 @@ class S3VersionAdmin(admin.ModelAdmin):
         alias = self._alias(request, aliases)
         prefix = request.GET.get("prefix", "").strip()
 
-        rows, truncated, page_obj, page_links = [], False, None, []
+        marker = request.GET.get("marker", "").strip()
+        rows, next_marker, page_number, prev_marker = [], None, 1, None
         if alias:
             storage = _get_storage(alias)
+            grouped = {}
             try:
-                grouped = storage.versions_under(prefix)
+                grouped, next_marker = storage.page_under(
+                    prefix, key_marker=marker or None, limit=PAGE_SIZE)
             except RestoreError as exc:
                 self.message_user(request, str(exc), messages.ERROR)
-                grouped = {}
 
-            names = sorted(grouped)
-            truncated = len(names) > BROWSE_LIMIT
-            paginator = Paginator(names[:BROWSE_LIMIT], PAGE_SIZE)
-            try:
-                page_obj = paginator.page(request.GET.get("page") or 1)
-            except PageNotAnInteger:
-                page_obj = paginator.page(1)
-            except EmptyPage:
-                page_obj = paginator.page(paginator.num_pages)
-            page_links = self._page_links(paginator, page_obj, alias, prefix)
+            page_number, prev_marker = self._track_page(request, alias, prefix, marker)
 
-            for name in page_obj.object_list:
-                history = grouped[name]
+            for name, history in grouped.items():
                 current = next((v for v in history if v.is_latest), history[0])
                 rows.append({
                     "name": name,
@@ -162,12 +154,14 @@ class S3VersionAdmin(admin.ModelAdmin):
             "bucket": getattr(_get_storage(alias), "bucket_name", "") if alias else "",
             "prefix": prefix,
             "rows": rows,
-            "truncated": truncated,
-            "limit": BROWSE_LIMIT,
-            "page_obj": page_obj,
-            "page_links": page_links,
-            "page": page_obj.number if page_obj else 1,
-            "total": page_obj.paginator.count if page_obj else 0,
+            "page_size": PAGE_SIZE,
+            "page_number": page_number,
+            "marker": marker,
+            "first_url": self._changelist_url(alias, prefix) if alias else "",
+            "prev_url": (self._changelist_url(alias, prefix, prev_marker)
+                         if prev_marker is not None else ""),
+            "next_url": (self._changelist_url(alias, prefix, next_marker)
+                         if next_marker else ""),
             "can_restore": self._can_restore(request),
             "bulk_url": reverse("admin:s3restore_s3version_bulk"),
             **(extra_context or {}),
@@ -292,7 +286,7 @@ class S3VersionAdmin(admin.ModelAdmin):
         if len(names) > BULK_LIMIT:
             raise SuspiciousOperation(f"Hoechstens {BULK_LIMIT} Dateien auf einmal.")
 
-        back_url = self._changelist_url(alias, prefix, request.POST.get("page"))
+        back_url = self._changelist_url(alias, prefix, request.POST.get("marker"))
         if not names:
             self.message_user(request, "Keine Datei ausgewaehlt.", messages.WARNING)
             return HttpResponseRedirect(back_url)
@@ -333,7 +327,7 @@ class S3VersionAdmin(admin.ModelAdmin):
                 "alias": alias,
                 "bucket": storage.bucket_name,
                 "prefix": prefix,
-                "page": request.POST.get("page", ""),
+                "marker": request.POST.get("marker", ""),
                 "planned": planned,
                 "skipped": skipped,
                 "names": [n for n, _ in planned],
@@ -400,29 +394,37 @@ class S3VersionAdmin(admin.ModelAdmin):
                 + "?" + urlencode({"storage": alias, "name": name}))
 
     @staticmethod
-    def _changelist_url(alias: str, prefix: str = "", page: int | str | None = None) -> str:
+    def _changelist_url(alias: str, prefix: str = "", marker: str | None = None) -> str:
         params = {"storage": alias, "prefix": prefix}
-        if page and str(page) != "1":
-            params["page"] = page
+        if marker:
+            params["marker"] = marker
         return (reverse("admin:s3restore_s3version_changelist") + "?" + urlencode(params))
 
-    @classmethod
-    def _page_links(cls, paginator, page_obj, alias, prefix) -> list[dict]:
-        """Seitenzahlen fuer die Blaetter-Leiste; None = Auslassung (…)."""
-        if paginator.num_pages <= 1:
-            return []
-        links = []
-        for number in paginator.get_elided_page_range(page_obj.number,
-                                                      on_each_side=2, on_ends=1):
-            if number == paginator.ELLIPSIS:
-                links.append({"number": None})
-            else:
-                links.append({
-                    "number": number,
-                    "current": number == page_obj.number,
-                    "url": cls._changelist_url(alias, prefix, number),
-                })
-        return links
+    @staticmethod
+    def _track_page(request, alias: str, prefix: str, marker: str) -> tuple[int, str | None]:
+        """Merkt sich die Startmarker der besuchten Seiten in der Session.
+
+        S3 blaettert nur vorwaerts -- fuer "Zurueck" und die Seitennummer
+        braucht es diese Kette. Sie haengt an (Storage, Praefix) und wird beim
+        Sprung auf die erste Seite zurueckgesetzt.
+        """
+        stacks = request.session.get(SESSION_KEY, {})
+        bucket_key = f"{alias}\n{prefix}"
+        stack = stacks.get(bucket_key, [])
+
+        if not marker:
+            stack = [""]
+        elif marker in stack:                      # Rueckwaerts- oder Direktsprung
+            stack = stack[:stack.index(marker) + 1]
+        else:
+            stack = (stack or [""]) + [marker]
+
+        stacks[bucket_key] = stack[-MARKER_STACK_LIMIT:]
+        request.session[SESSION_KEY] = stacks
+        request.session.modified = True
+
+        prev_marker = stack[-2] if len(stack) > 1 else None
+        return len(stack), prev_marker
 
     def _log(self, request, alias, name, target):
         """Wiederherstellung in der Admin-Historie festhalten."""

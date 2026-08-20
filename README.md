@@ -67,15 +67,31 @@ Ablauf: Präfix durchsuchen → Objekt anklicken → Version wählen → bestät
 
 ### Blättern
 
-Die Liste ist auf **50 Objekte pro Seite** paginiert (`PAGE_SIZE` in `admin.py`),
-mit Seitenzahlen im Admin-Look und Gesamtzahl:
+Geblättert wird mit dem **KeyMarker von S3**, nicht über eine im Speicher
+gehaltene Gesamtliste: pro Seite holt `page_under()` genau so viele Antworten,
+wie für `PAGE_SIZE` (50) Objekte nötig sind. Ein Präfix mit hunderttausend
+Objekten kostet dadurch dasselbe wie einer mit fünfzig.
 
-![Pagination](docs/img/pagination.png)
+![Blättern](docs/img/pagination.png)
 
-Aus S3 werden dabei höchstens `BROWSE_LIMIT` (5000) Objekte eingesammelt – darüber
-erscheint der Hinweis, den Präfix weiter einzugrenzen. Die Checkbox-Auswahl gilt
-immer nur für die aktuelle Seite; nach einer Sammelaktion landest du wieder auf
-derselben Seite.
+Was das an der Oberfläche bedeutet: es gibt „Weiter", „Zurück" und „Erste" statt
+Seitenzahlen, und keine Gesamtzahl – S3 kennt beides nicht. Die Kette der
+besuchten Startmarker liegt in der Session (`SESSION_KEY`), daher funktioniert
+„Zurück" trotzdem, und die Seitennummer wird mitgezählt.
+
+Zwei Details, die dabei leicht schiefgehen:
+
+* **Historien an der Batch-Grenze.** Die Versionen eines Keys können sich über
+  mehrere S3-Antworten verteilen. `page_under()` liest deshalb immer einen Key
+  weiter, als es anzeigt – erst dadurch ist der letzte Key der Seite sicher
+  vollständig eingelesen (Versionszahl und aktueller Stand stimmen also).
+* **Marker-Semantik.** AWS beginnt die Liste *hinter* dem `KeyMarker`, manche
+  Nachbauten (moto, je nach Version auch MinIO/Ceph) liefern den Marker-Key
+  selbst noch mit. `page_under()` filtert defensiv, sonst stünde ein Objekt auf
+  zwei Seiten.
+
+Die Checkbox-Auswahl gilt immer nur für die aktuelle Seite; nach einer
+Sammelaktion landest du wieder auf derselben Seite.
 
 ### Sammelaktion
 
@@ -172,7 +188,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-81 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
+87 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
 S3-Bucket – kein echtes AWS, keine Credentials nötig.
 
 Die Screenshots oben stammen aus einem Playwright-Durchlauf gegen genau diesen

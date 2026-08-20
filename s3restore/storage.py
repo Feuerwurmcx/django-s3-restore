@@ -160,25 +160,84 @@ class VersionedS3Storage(S3Boto3Storage):
             hist.sort(key=_sort_key, reverse=True)
         return grouped
 
+    def page_under(self, prefix: str = "", *, key_marker: str | None = None,
+                   limit: int = 50, batch_size: int | None = None
+                   ) -> tuple[dict[str, list[Version]], str | None]:
+        """Ein Batch Objekte ab `key_marker` -- echtes S3-Paging.
+
+        S3 kennt keine Gesamtzahl und kein Rueckwaertsblaettern: die API
+        liefert Keys ab einem Marker. Diese Methode holt so viele Antworten,
+        bis `limit` + 1 verschiedene Keys beisammen sind, und gibt zurueck:
+
+            ({name: [Version, ...]}, naechster_key_marker | None)
+
+        Der +1. Key wird nur benutzt, um zu wissen, dass der `limit`-te Key
+        vollstaendig eingelesen ist (die Versionen eines Keys koennen sich
+        ueber mehrere Antworten verteilen) -- er landet nicht im Ergebnis.
+        Der zurueckgegebene Marker ist der letzte Key dieser Seite; damit
+        beginnt die naechste Seite direkt dahinter.
+        """
+        self._check_versioning()
+        key_prefix = self.key_for(prefix) if prefix else self.location
+        kwargs = {"Bucket": self.bucket_name, "Prefix": key_prefix,
+                  "MaxKeys": batch_size or max(limit * 2, 100)}
+        if key_marker:
+            kwargs["KeyMarker"] = key_marker
+
+        grouped: dict[str, list[Version]] = {}
+        truncated = True
+        while truncated and len(grouped) <= limit:
+            response = self.s3_client.list_object_versions(**kwargs)
+            for version in self._versions_in(response):
+                # AWS beginnt hinter dem KeyMarker, manche Nachbauten (moto,
+                # je nach Version auch MinIO/Ceph) liefern den Marker-Key selbst
+                # noch mit -- sonst erschiene er auf zwei Seiten.
+                if key_marker and version.key <= key_marker:
+                    continue
+                grouped.setdefault(version.name, []).append(version)
+            truncated = response.get("IsTruncated", False)
+            if truncated:
+                kwargs["KeyMarker"] = response["NextKeyMarker"]
+                if response.get("NextVersionIdMarker"):
+                    kwargs["VersionIdMarker"] = response["NextVersionIdMarker"]
+                else:
+                    kwargs.pop("VersionIdMarker", None)
+
+        names = list(grouped)
+        next_marker = None
+        if len(names) > limit:
+            for extra in names[limit:]:
+                del grouped[extra]
+            next_marker = self.key_for(names[limit - 1])
+        for hist in grouped.values():
+            hist.sort(key=_sort_key, reverse=True)
+        return grouped, next_marker
+
+    def _versions_in(self, response) -> list[Version]:
+        """Versionen und Delete-Marker einer list_object_versions-Antwort."""
+        out = []
+        for v in response.get("Versions", []):
+            out.append(Version(
+                name=self.name_for(v["Key"]), key=v["Key"],
+                version_id=v["VersionId"], last_modified=v["LastModified"],
+                is_latest=v["IsLatest"], is_delete_marker=False,
+                size=v.get("Size"), etag=v.get("ETag"),
+                storage_class=v.get("StorageClass"),
+            ))
+        for d in response.get("DeleteMarkers", []):
+            out.append(Version(
+                name=self.name_for(d["Key"]), key=d["Key"],
+                version_id=d["VersionId"], last_modified=d["LastModified"],
+                is_latest=d["IsLatest"], is_delete_marker=True,
+            ))
+        return out
+
     def _list(self, key_prefix: str) -> list[Version]:
         self._check_versioning()
         out: list[Version] = []
         paginator = self.s3_client.get_paginator("list_object_versions")
         for page in paginator.paginate(Bucket=self.bucket_name, Prefix=key_prefix):
-            for v in page.get("Versions", []):
-                out.append(Version(
-                    name=self.name_for(v["Key"]), key=v["Key"],
-                    version_id=v["VersionId"], last_modified=v["LastModified"],
-                    is_latest=v["IsLatest"], is_delete_marker=False,
-                    size=v.get("Size"), etag=v.get("ETag"),
-                    storage_class=v.get("StorageClass"),
-                ))
-            for d in page.get("DeleteMarkers", []):
-                out.append(Version(
-                    name=self.name_for(d["Key"]), key=d["Key"],
-                    version_id=d["VersionId"], last_modified=d["LastModified"],
-                    is_latest=d["IsLatest"], is_delete_marker=True,
-                ))
+            out.extend(self._versions_in(page))
         out.sort(key=_sort_key, reverse=True)
         return out
 

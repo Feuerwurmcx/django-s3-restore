@@ -64,7 +64,7 @@
     {% csrf_token %}
     <input type="hidden" name="storage" value="{{ alias }}">
     <input type="hidden" name="prefix" value="{{ prefix }}">
-    <input type="hidden" name="page" value="{{ page }}">
+    <input type="hidden" name="marker" value="{{ marker }}">
     <input type="hidden" name="action" value="restore_previous">
     <input type="hidden" name="confirm" value="yes">
     {% for name in names %}

@@ -1,6 +1,8 @@
 """Tests fuer die Admin-Seite zur S3-Wiederherstellung (moto, kein echtes S3)."""
+import re
 import time
-from urllib.parse import urlencode
+from html import unescape
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import boto3
 import pytest
@@ -342,7 +344,7 @@ def test_bulk_needs_restore_permission(storage, client, db):
     assert read(storage, "config/a.json") == "a-neu"
 
 
-# --------------------------------------------------------------- Pagination
+# ------------------------------------------------- Blaettern per S3-KeyMarker
 
 @pytest.fixture
 def many_files(storage):
@@ -354,71 +356,151 @@ def many_files(storage):
     return storage
 
 
+def marker_of(url: str) -> str:
+    return parse_qs(urlsplit(url).query).get("marker", [""])[0]
+
+
+def next_url(body: str) -> str:
+    """Ziel des 'Weiter'-Links aus dem gerenderten HTML."""
+    match = re.search(r'href="([^"]+)">Weiter', body)
+    return unescape(match.group(1)) if match else ""
+
+
+def prev_url(body: str) -> str:
+    match = re.search(r'href="([^"]+)">&lsaquo; Zurueck', body)
+    return unescape(match.group(1)) if match else ""
+
+
 def test_first_page_shows_page_size_rows(many_files, admin_client):
     body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
     assert body.count('name="names"') == 50
-    assert "config/datei-000.txt" in body
-    assert "config/datei-050.txt" not in body
-    assert "120 Objekte" in body and "Seite 1 von 3" in body
+    assert "config/datei-000.txt" in body and "config/datei-050.txt" not in body
+    assert "Seite 1" in body and "50 Objekte auf dieser Seite" in body
+    assert next_url(body) and not prev_url(body)
 
 
-def test_second_page_shows_next_slice(many_files, admin_client):
-    body = admin_client.get(CHANGELIST, {"prefix": "config/", "page": 2}).content.decode()
-    assert "config/datei-050.txt" in body
-    assert "config/datei-000.txt" not in body
-    assert "Seite 2 von 3" in body
-
-
-def test_last_page_shows_remainder(many_files, admin_client):
-    body = admin_client.get(CHANGELIST, {"prefix": "config/", "page": 3}).content.decode()
-    assert body.count('name="names"') == 20
-    assert "config/datei-119.txt" in body
-
-
-def test_page_links_are_rendered(many_files, admin_client):
+def test_next_marker_is_last_key_of_page(many_files, admin_client):
     body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
-    assert "page=2" in body and "page=3" in body
-    assert 'class="this-page"' in body
+    assert marker_of(next_url(body)) == "media/config/datei-049.txt"
 
 
-def test_invalid_page_falls_back(many_files, admin_client):
-    assert "Seite 1 von 3" in admin_client.get(
-        CHANGELIST, {"prefix": "config/", "page": "abc"}).content.decode()
-    assert "Seite 3 von 3" in admin_client.get(
-        CHANGELIST, {"prefix": "config/", "page": 99}).content.decode()
+def test_walking_forward_covers_all_objects(many_files, admin_client):
+    seen, url, pages = [], CHANGELIST + "?prefix=config/", 0
+    while url:
+        body = admin_client.get(url).content.decode()
+        seen += re.findall(r'name="names" value="([^"]+)"', body)
+        url, pages = next_url(body), pages + 1
+    assert pages == 3
+    assert len(seen) == len(set(seen)) == 120
+    assert seen[0] == "config/datei-000.txt" and seen[-1] == "config/datei-119.txt"
 
 
-def test_no_paginator_bar_for_single_page(storage, admin_client):
+def test_last_page_has_no_next_link(many_files, admin_client):
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    body = admin_client.get(next_url(body)).content.decode()
+    last = admin_client.get(next_url(body)).content.decode()
+    assert last.count('name="names"') == 20
+    assert not next_url(last) and "Ende der Liste" in last
+    assert "Seite 3" in last
+
+
+def test_back_link_returns_to_previous_page(many_files, admin_client):
+    first = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    second = admin_client.get(next_url(first)).content.decode()
+    assert "Seite 2" in second
+    back = admin_client.get(prev_url(second)).content.decode()
+    assert "Seite 1" in back
+    assert "config/datei-000.txt" in back
+
+
+def test_page_counter_resets_on_first_page(many_files, admin_client):
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    body = admin_client.get(next_url(body)).content.decode()
+    assert "Seite 2" in body
+    again = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    assert "Seite 1" in again and not prev_url(again)
+
+
+def test_unknown_marker_still_renders(many_files, admin_client):
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "marker": "media/config/datei-100.txt"}).content.decode()
+    assert body.count('name="names"') == 19          # 101..119
+    assert "config/datei-101.txt" in body and not next_url(body)
+
+
+def test_no_paginator_links_for_single_page(storage, admin_client):
     put(storage, "v1", "config/a.json")
     body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
-    assert "1 Objekt" in body
-    assert "Seite 1 von" not in body
-    assert 'class="this-page"' not in body
+    assert "1 Objekt auf dieser Seite" in body
+    assert not next_url(body) and not prev_url(body)
+    assert "Auswahl gilt nur fuer diese Seite" not in body
 
 
-def test_selection_hint_only_when_paginated(many_files, admin_client, storage):
-    many = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
-    assert "Auswahl gilt nur fuer diese Seite" in many
-
-
-def test_bulk_returns_to_same_page(many_files, admin_client):
+def test_bulk_returns_to_same_marker(many_files, admin_client):
     storage = many_files
-    # zweite Version fuer eine Datei auf Seite 2 anlegen
     time.sleep(1.05)
     storage.s3_client.put_object(Bucket=BUCKET,
                                  Key=storage.key_for("config/datei-050.txt"), Body=b"neu")
+    marker = "media/config/datei-049.txt"
     resp = admin_client.post(BULK, {
-        "storage": "default", "prefix": "config/", "page": "2",
+        "storage": "default", "prefix": "config/", "marker": marker,
         "action": "restore_previous", "confirm": "yes",
         "names": ["config/datei-050.txt"]})
     assert resp.status_code == 302
-    assert "page=2" in resp["Location"] and "prefix=config" in resp["Location"]
+    assert marker_of(resp["Location"]) == marker
     assert read(storage, "config/datei-050.txt") == "x"
 
 
-def test_bulk_confirmation_keeps_page(many_files, admin_client):
+def test_bulk_confirmation_keeps_marker(many_files, admin_client):
     body = admin_client.post(BULK, {
-        "storage": "default", "prefix": "config/", "page": "2",
+        "storage": "default", "prefix": "config/", "marker": "media/config/datei-049.txt",
         "action": "restore_previous",
         "names": ["config/datei-050.txt"]}).content.decode()
-    assert '<input type="hidden" name="page" value="2">' in body
+    assert 'name="marker" value="media/config/datei-049.txt"' in body
+
+
+# --------------------------------------------- page_under() direkt (Storage)
+
+def test_page_under_returns_batch_and_marker(many_files):
+    grouped, marker = many_files.page_under("config/", limit=10)
+    assert list(grouped)[:2] == ["config/datei-000.txt", "config/datei-001.txt"]
+    assert len(grouped) == 10
+    assert marker == "media/config/datei-009.txt"
+
+
+def test_page_under_last_batch_has_no_marker(many_files):
+    grouped, marker = many_files.page_under(
+        "config/", key_marker="media/config/datei-109.txt", limit=50)
+    assert len(grouped) == 10 and marker is None
+
+
+def test_page_under_keeps_histories_complete_across_batches(storage):
+    """Ein Key mit vielen Versionen darf nicht an der Batch-Grenze zerreissen."""
+    for name in ("config/a.txt", "config/b.txt", "config/c.txt"):
+        for i in range(5):
+            storage.s3_client.put_object(Bucket=BUCKET, Key=storage.key_for(name),
+                                         Body=f"{name}-{i}".encode())
+    grouped, marker = storage.page_under("config/", limit=2, batch_size=2)
+    assert list(grouped) == ["config/a.txt", "config/b.txt"]
+    assert [len(h) for h in grouped.values()] == [5, 5]      # vollstaendig
+    assert marker == "media/config/b.txt"
+
+    rest, marker2 = storage.page_under("config/", key_marker=marker, limit=2, batch_size=2)
+    assert list(rest) == ["config/c.txt"] and len(rest["config/c.txt"]) == 5
+    assert marker2 is None
+
+
+def test_page_under_ignores_other_prefixes(storage):
+    storage.s3_client.put_object(Bucket=BUCKET, Key=storage.key_for("config/a.txt"), Body=b"x")
+    storage.s3_client.put_object(Bucket=BUCKET, Key=storage.key_for("logs/b.txt"), Body=b"x")
+    grouped, _ = storage.page_under("config/", limit=50)
+    assert list(grouped) == ["config/a.txt"]
+
+
+def test_page_under_skips_marker_key_itself(storage):
+    """Der Marker-Key darf nicht doppelt erscheinen -- egal wie das Backend
+    KeyMarker auslegt (AWS beginnt dahinter, moto liefert ihn mit)."""
+    for name in ("config/a.txt", "config/b.txt"):
+        storage.s3_client.put_object(Bucket=BUCKET, Key=storage.key_for(name), Body=b"x")
+    grouped, _ = storage.page_under("config/", key_marker="media/config/a.txt", limit=50)
+    assert list(grouped) == ["config/b.txt"]
