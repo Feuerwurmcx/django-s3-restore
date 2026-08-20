@@ -16,6 +16,7 @@ NAME = "config/zones.json"
 CHANGELIST = "/admin/s3restore/s3version/"
 VERSIONS = "/admin/s3restore/s3version/versions/"
 RESTORE = "/admin/s3restore/s3version/restore/"
+BULK = "/admin/s3restore/s3version/bulk/"
 
 
 @pytest.fixture
@@ -224,3 +225,118 @@ def test_csrf_token_is_required(storage, admin_client, settings):
                                  "version_id": old.version_id, "confirm": "yes"})
     assert resp.status_code == 403
     assert read(storage) == "v2"
+
+
+# --------------------------------------------------------------- Sammelaktion
+
+def seed_three(storage):
+    """a und b haben zwei Versionen, c nur eine."""
+    put(storage, "a-alt", "config/a.json"); put(storage, "a-neu", "config/a.json")
+    put(storage, "b-alt", "config/b.json"); put(storage, "b-neu", "config/b.json")
+    put(storage, "c-einzig", "config/c.json")
+
+
+def test_bulk_url_resolves():
+    assert reverse("admin:s3restore_s3version_bulk") == BULK
+
+
+def test_changelist_has_checkboxes_and_action(storage, admin_client):
+    seed_three(storage)
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    assert body.count('name="names"') == 3
+    assert 'id="action-toggle"' in body
+    assert "Vorherige Version wiederherstellen" in body
+    assert 'value="restore_previous"' in body
+
+
+def test_bulk_confirmation_lists_plan_and_skips(storage, admin_client):
+    seed_three(storage)
+    resp = admin_client.post(BULK, {
+        "storage": "default", "prefix": "config/", "action": "restore_previous",
+        "names": ["config/a.json", "config/b.json", "config/c.json"]})
+    body = resp.content.decode()
+    assert resp.status_code == 200
+    assert "Ja, 2 Datei(en) zuruecksetzen" in body
+    assert "Wird uebersprungen" in body and "config/c.json" in body
+    # noch nichts passiert
+    assert read(storage, "config/a.json") == "a-neu"
+
+
+def test_bulk_restores_selected_files(storage, admin_client):
+    seed_three(storage)
+    resp = admin_client.post(BULK, {
+        "storage": "default", "prefix": "config/", "action": "restore_previous",
+        "confirm": "yes",
+        "names": ["config/a.json", "config/b.json", "config/c.json"]}, follow=True)
+    assert read(storage, "config/a.json") == "a-alt"
+    assert read(storage, "config/b.json") == "b-alt"
+    assert read(storage, "config/c.json") == "c-einzig"      # unveraendert
+    body = resp.content.decode()
+    assert "2 Datei(en) auf die vorherige Version zurueckgesetzt" in body
+    assert "es gibt nur eine Version" in body
+
+
+def test_bulk_only_touches_selected_files(storage, admin_client):
+    seed_three(storage)
+    admin_client.post(BULK, {"storage": "default", "prefix": "config/",
+                             "action": "restore_previous", "confirm": "yes",
+                             "names": ["config/a.json"]})
+    assert read(storage, "config/a.json") == "a-alt"
+    assert read(storage, "config/b.json") == "b-neu"
+
+
+def test_bulk_writes_one_log_entry_per_file(storage, admin_client):
+    seed_three(storage)
+    admin_client.post(BULK, {"storage": "default", "prefix": "config/",
+                             "action": "restore_previous", "confirm": "yes",
+                             "names": ["config/a.json", "config/b.json"]})
+    assert sorted(LogEntry.objects.values_list("object_id", flat=True)) == [
+        "config/a.json", "config/b.json"]
+
+
+def test_bulk_undeletes_selected_file(storage, admin_client):
+    put(storage, "v1", "config/a.json")
+    storage.delete("config/a.json")
+    admin_client.post(BULK, {"storage": "default", "prefix": "config/",
+                             "action": "restore_previous", "confirm": "yes",
+                             "names": ["config/a.json"]})
+    assert storage.exists("config/a.json") and read(storage, "config/a.json") == "v1"
+
+
+def test_bulk_without_selection_warns(storage, admin_client):
+    seed_three(storage)
+    resp = admin_client.post(BULK, {"storage": "default", "prefix": "config/",
+                                    "action": "restore_previous"}, follow=True)
+    assert "Keine Datei ausgewaehlt" in resp.content.decode()
+
+
+def test_bulk_rejects_get(storage, admin_client):
+    assert admin_client.get(BULK).status_code == 400
+
+
+def test_bulk_rejects_unknown_action(storage, admin_client):
+    seed_three(storage)
+    assert admin_client.post(BULK, {"storage": "default", "action": "loeschen",
+                                    "names": ["config/a.json"]}).status_code == 400
+
+
+def test_bulk_rejects_too_many_names(storage, admin_client):
+    resp = admin_client.post(BULK, {"storage": "default", "action": "restore_previous",
+                                    "names": [f"f{i}.txt" for i in range(201)]})
+    assert resp.status_code == 400
+
+
+def test_bulk_needs_restore_permission(storage, client, db):
+    seed_three(storage)
+    user = User.objects.create_user("leser2", password="pw", is_staff=True)
+    user.user_permissions.add(Permission.objects.get(codename="view_s3version"))
+    client.force_login(user)
+
+    body = client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    assert 'name="names"' not in body                     # keine Checkboxen
+    assert "Vorherige Version wiederherstellen" not in body
+
+    resp = client.post(BULK, {"storage": "default", "action": "restore_previous",
+                              "confirm": "yes", "names": ["config/a.json"]})
+    assert resp.status_code == 403
+    assert read(storage, "config/a.json") == "a-neu"

@@ -52,6 +52,7 @@ except ImportError:  # pragma: no cover
 
 
 BROWSE_LIMIT = 500  # so viele Objekte zeigt die Uebersicht hoechstens
+BULK_LIMIT = 200    # so viele Dateien nimmt die Sammelaktion hoechstens entgegen
 
 
 def versioned_aliases() -> list[str]:
@@ -104,6 +105,8 @@ class S3VersionAdmin(admin.ModelAdmin):
                  name="%s_%s_versions" % info),
             path("restore/", self.admin_site.admin_view(self.restore_view),
                  name="%s_%s_restore" % info),
+            path("bulk/", self.admin_site.admin_view(self.bulk_view),
+                 name="%s_%s_bulk" % info),
             *super().get_urls(),
         ]
 
@@ -148,6 +151,8 @@ class S3VersionAdmin(admin.ModelAdmin):
             "rows": rows,
             "truncated": truncated,
             "limit": BROWSE_LIMIT,
+            "can_restore": self._can_restore(request),
+            "bulk_url": reverse("admin:s3restore_s3version_bulk"),
             **(extra_context or {}),
         }
         return render(request, "admin/s3restore/s3version/change_list.html", context)
@@ -245,6 +250,105 @@ class S3VersionAdmin(admin.ModelAdmin):
             self.message_user(request, f"Fehlgeschlagen: {result.reason}", messages.ERROR)
 
         return HttpResponseRedirect(self._versions_url(alias, name))
+
+    def bulk_view(self, request):
+        """Sammelaktion aus der Uebersicht: mehrere Dateien eine Version zurueck.
+
+        Schritt 1 zeigt, welche Version je Datei kommen wuerde (und was warum
+        uebersprungen wird), Schritt 2 fuehrt aus. Nur POST.
+        """
+        if request.method != "POST":
+            raise SuspiciousOperation("Sammelaktion nur per POST.")
+        if not self._can_restore(request):
+            raise PermissionDenied
+
+        aliases = versioned_aliases()
+        alias = self._alias(request, aliases, source=request.POST)
+        prefix = request.POST.get("prefix", "").strip()
+        action = request.POST.get("action", "").strip()
+        names = [n.strip() for n in request.POST.getlist("names") if n.strip()]
+
+        if action != "restore_previous":
+            raise SuspiciousOperation(f"Unbekannte Aktion '{action}'.")
+        if not alias:
+            raise SuspiciousOperation("Kein Storage angegeben.")
+        if len(names) > BULK_LIMIT:
+            raise SuspiciousOperation(f"Hoechstens {BULK_LIMIT} Dateien auf einmal.")
+
+        back_url = self._changelist_url(alias, prefix)
+        if not names:
+            self.message_user(request, "Keine Datei ausgewaehlt.", messages.WARNING)
+            return HttpResponseRedirect(back_url)
+
+        storage = _get_storage(alias)
+        planned, skipped = [], []
+        for name in sorted(set(names)):
+            history = storage.versions(name)
+            if not history:
+                skipped.append((name, "nicht im Bucket gefunden"))
+                continue
+            current = next((v for v in history if v.is_latest), history[0])
+            real = [v for v in history if not v.is_delete_marker]
+            if not real:
+                skipped.append((name, "nur Delete-Marker, keine Daten zum Zurueckholen"))
+                continue
+            if len(real) == 1 and not current.is_delete_marker:
+                skipped.append((name, "es gibt nur eine Version"))
+                continue
+            try:
+                target = storage.pick(history, steps=1)
+            except RestoreError as exc:
+                skipped.append((name, str(exc)))
+                continue
+            if target.is_delete_marker:
+                skipped.append((name, "davor lag nur ein Delete-Marker"))
+            elif target.is_latest:
+                skipped.append((name, "es gibt nur eine Version"))
+            else:
+                planned.append((name, target))
+
+        # Schritt 1: Bestaetigungsseite
+        if request.POST.get("confirm") != "yes":
+            context = {
+                **self.admin_site.each_context(request),
+                "title": "Vorherige Version wiederherstellen?",
+                "opts": self.model._meta,
+                "alias": alias,
+                "bucket": storage.bucket_name,
+                "prefix": prefix,
+                "planned": planned,
+                "skipped": skipped,
+                "names": [n for n, _ in planned],
+                "bulk_url": reverse("admin:s3restore_s3version_bulk"),
+                "back_url": back_url,
+            }
+            return render(request, "admin/s3restore/s3version/bulk_confirmation.html",
+                          context)
+
+        # Schritt 2: ausfuehren
+        done, failed = 0, 0
+        for name, target in planned:
+            result = storage.restore(name, version_id=target.version_id)
+            if result.action == "restored":
+                done += 1
+                self._log(request, alias, name, target)
+            elif result.action == "failed":
+                failed += 1
+                self.message_user(request, f"{name}: {result.reason}", messages.ERROR)
+            else:
+                self.message_user(request, f"{name}: {result.reason}", messages.WARNING)
+
+        if done:
+            self.message_user(
+                request,
+                f"{done} Datei(en) auf die vorherige Version zurueckgesetzt.",
+                messages.SUCCESS)
+        for name, reason in skipped:
+            self.message_user(request, f"{name}: {reason}", messages.WARNING)
+        if not done and not failed and not skipped:
+            self.message_user(request, "Nichts geaendert.", messages.WARNING)
+
+        return HttpResponseRedirect(back_url)
 
     # ------------------------------------------------------------------ Helfer
     @staticmethod

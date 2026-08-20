@@ -63,9 +63,24 @@ Berechtigungen an (eine Tabelle entsteht nicht, das Admin-Modell ist
 Die Seite hängt unter **Admin → S3 Restore → S3-Wiederherstellung**.
 Ablauf: Präfix durchsuchen → Objekt anklicken → Version wählen → bestätigen.
 
-| Übersicht | Bestätigung |
-|---|---|
-| ![Übersicht](docs/img/uebersicht.png) | ![Bestätigung](docs/img/bestaetigung.png) |
+![Übersicht](docs/img/uebersicht.png)
+
+### Sammelaktion
+
+Jede Zeile hat eine Checkbox (inklusive „alles auswählen" im Tabellenkopf). Mit der
+Aktion **Vorherige Version wiederherstellen** gehen alle markierten Dateien auf
+einen Schlag eine Version zurück. Die Bestätigungsseite zeigt vorher pro Datei, auf
+welchen Stand es geht – und was warum übersprungen wird (nur eine Version
+vorhanden, nur Delete-Marker, nicht mehr im Bucket):
+
+![Sammelaktion](docs/img/sammelaktion.png)
+
+Ist der aktuelle Stand einer markierten Datei ein Delete-Marker, holt die Aktion die
+jüngste echte Version zurück – die Datei ist danach wieder da.
+
+Einzeln geht es genauso, über die Versionsliste der Datei:
+
+![Bestätigung](docs/img/bestaetigung.png)
 
 Jede alte Version hat einen *öffnen*-Link (presigned URL, 5 Minuten gültig) –
 so lässt sich der Inhalt prüfen, **bevor** zurückgerollt wird. Nach dem Rollback:
@@ -145,9 +160,16 @@ pip install -e ".[dev]"
 pytest
 ```
 
-60 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
-S3-Bucket – kein echtes AWS, keine Credentials nötig. Die Screenshots oben
-stammen aus einem Playwright-Durchlauf gegen genau diesen gemockten Bucket.
+72 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
+S3-Bucket – kein echtes AWS, keine Credentials nötig.
+
+Die Screenshots oben stammen aus einem Playwright-Durchlauf gegen genau diesen
+gemockten Bucket und lassen sich neu erzeugen mit:
+
+```bash
+pip install playwright && playwright install chromium
+pytest shots.py
+```
 
 ## Details, die in der Praxis beißen
 

@@ -41,36 +41,96 @@
   </div>
 
   {% if rows %}
-    <div class="results">
-      <table id="result_list">
-        <thead>
-          <tr>
-            <th scope="col">Objekt</th>
-            <th scope="col">Aktueller Stand</th>
-            <th scope="col">Groesse</th>
-            <th scope="col">Versionen</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for row in rows %}
-            <tr class="{% cycle 'row1' 'row2' %}">
-              <th scope="row"><a href="{{ row.url }}">{{ row.name }}</a></th>
-              <td>
-                {{ row.current.last_modified|date:"d.m.Y H:i:s" }}
-                {% if row.deleted %}
-                  <span style="color:#ba2121;font-weight:600;">&nbsp;geloescht</span>
-                {% endif %}
-              </td>
-              <td>{% if row.deleted %}&mdash;{% else %}{{ row.current.size|filesizeformat }}{% endif %}</td>
-              <td>{{ row.count }}</td>
+    <form method="post" action="{{ bulk_url }}" id="bulk-form">
+      {% csrf_token %}
+      <input type="hidden" name="storage" value="{{ alias }}">
+      <input type="hidden" name="prefix" value="{{ prefix }}">
+
+      {% if can_restore %}
+        <div class="actions">
+          <label for="id_action">Aktion:</label>
+          <select name="action" id="id_action">
+            <option value="restore_previous">Vorherige Version wiederherstellen</option>
+          </select>
+          <button type="submit" class="button" id="run-action" disabled>Ausfuehren</button>
+          <span class="action-counter" id="action-counter" style="margin-left:8px;"></span>
+        </div>
+      {% endif %}
+
+      <div class="results">
+        <table id="result_list">
+          <thead>
+            <tr>
+              {% if can_restore %}
+                <th scope="col" class="action-checkbox-column">
+                  <input type="checkbox" id="action-toggle" aria-label="Alle auswaehlen">
+                </th>
+              {% endif %}
+              <th scope="col">Objekt</th>
+              <th scope="col">Aktueller Stand</th>
+              <th scope="col">Groesse</th>
+              <th scope="col">Versionen</th>
             </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+              <tr class="{% cycle 'row1' 'row2' %}">
+                {% if can_restore %}
+                  <td class="action-checkbox">
+                    <input type="checkbox" name="names" value="{{ row.name }}"
+                           class="action-select" aria-label="{{ row.name }} auswaehlen">
+                  </td>
+                {% endif %}
+                <th scope="row"><a href="{{ row.url }}">{{ row.name }}</a></th>
+                <td>
+                  {{ row.current.last_modified|date:"d.m.Y H:i:s" }}
+                  {% if row.deleted %}
+                    <span style="color:#ba2121;font-weight:600;">&nbsp;geloescht</span>
+                  {% endif %}
+                </td>
+                <td>{% if row.deleted %}&mdash;{% else %}{{ row.current.size|filesizeformat }}{% endif %}</td>
+                <td>{{ row.count }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </form>
+
     {% if truncated %}
       <p class="help">Es werden nur die ersten {{ limit }} Objekte angezeigt &ndash;
         grenze den Praefix weiter ein.</p>
+    {% endif %}
+    {% if not can_restore %}
+      <p class="help">Dir fehlt das Recht <code>s3restore.restore_s3version</code>
+        &ndash; nur Ansicht.</p>
+    {% endif %}
+
+    {% if can_restore %}
+      <script>
+        (function () {
+          var form = document.getElementById("bulk-form");
+          var toggle = document.getElementById("action-toggle");
+          var button = document.getElementById("run-action");
+          var counter = document.getElementById("action-counter");
+          var boxes = form.querySelectorAll("input.action-select");
+
+          function update() {
+            var n = form.querySelectorAll("input.action-select:checked").length;
+            button.disabled = n === 0;
+            counter.textContent = n ? n + " von " + boxes.length + " ausgewaehlt" : "";
+            toggle.checked = n === boxes.length && n > 0;
+            toggle.indeterminate = n > 0 && n < boxes.length;
+          }
+
+          toggle.addEventListener("change", function () {
+            boxes.forEach(function (b) { b.checked = toggle.checked; });
+            update();
+          });
+          boxes.forEach(function (b) { b.addEventListener("change", update); });
+          update();
+        })();
+      </script>
     {% endif %}
   {% else %}
     <p class="help">Keine Objekte unter diesem Praefix gefunden.</p>
