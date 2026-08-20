@@ -56,6 +56,7 @@ except ImportError:  # pragma: no cover
 PAGE_SIZE = 50       # Objekte pro Seite (ein S3-Batch ab dem KeyMarker)
 BULK_LIMIT = 200     # so viele Dateien nimmt die Sammelaktion hoechstens entgegen
 PATH_PREVIEW = 200   # so viele Zeilen zeigt die Pfad-Bestaetigung konkret
+SCAN_LIMIT = 5000    # so viele Objekte durchsucht der Geloescht-Filter je Seite
 SESSION_KEY = "s3restore_markers"   # Kette der Seiten-Startmarker je Praefix
 MARKER_STACK_LIMIT = 500            # so viele Seiten merkt sich die Session
 
@@ -128,33 +129,24 @@ class S3VersionAdmin(admin.ModelAdmin):
         prefix = request.GET.get("prefix", "").strip()
 
         marker = request.GET.get("marker", "").strip()
-        show_all = request.GET.get("all") == "1"
-        rows, next_marker, page_number, prev_marker, hidden = [], None, 1, None, 0
+        show = self._show_mode(request)
+        rows, next_marker, page_number, prev_marker = [], None, 1, None
+        hidden, scanned, scan_capped = 0, 0, False
         if alias:
             storage = _get_storage(alias)
-            grouped = {}
             try:
-                grouped, next_marker = storage.page_under(
-                    prefix, key_marker=marker or None, limit=PAGE_SIZE)
+                if show == "deleted":
+                    # Geloeschtes ist selten -- hier wird vorwaerts gesucht, bis
+                    # die Seite voll ist, statt fast leere Seiten zu zeigen.
+                    rows, next_marker, scanned, scan_capped = self._scan_deleted(
+                        storage, alias, prefix, marker)
+                else:
+                    rows, next_marker, hidden = self._page_rows(
+                        storage, alias, prefix, marker, show == "all")
             except RestoreError as exc:
                 self.message_user(request, str(exc), messages.ERROR)
 
             page_number, prev_marker = self._track_page(request, alias, prefix, marker)
-
-            for name, history in grouped.items():
-                current = next((v for v in history if v.is_latest), history[0])
-                if not self._restorable(history, current):
-                    hidden += 1
-                    if not show_all:
-                        continue
-                rows.append({
-                    "name": name,
-                    "count": len(history),
-                    "current": current,
-                    "deleted": current.is_delete_marker,
-                    "restorable": self._restorable(history, current),
-                    "url": self._versions_url(alias, name),
-                })
 
         context = {
             **self.admin_site.each_context(request),
@@ -168,14 +160,22 @@ class S3VersionAdmin(admin.ModelAdmin):
             "page_size": PAGE_SIZE,
             "page_number": page_number,
             "marker": marker,
-            "first_url": self._changelist_url(alias, prefix, None, show_all) if alias else "",
-            "prev_url": (self._changelist_url(alias, prefix, prev_marker, show_all)
+            "first_url": self._changelist_url(alias, prefix, None, show) if alias else "",
+            "prev_url": (self._changelist_url(alias, prefix, prev_marker, show)
                          if prev_marker is not None else ""),
-            "next_url": (self._changelist_url(alias, prefix, next_marker, show_all)
+            "next_url": (self._changelist_url(alias, prefix, next_marker, show)
                          if next_marker else ""),
-            "show_all": show_all,
+            "show": show,
             "hidden": hidden,
-            "toggle_url": self._changelist_url(alias, prefix, marker, not show_all),
+            "scanned": scanned,
+            "scan_capped": scan_capped,
+            "filters": [
+                {"key": key, "label": label, "active": show == key,
+                 "url": self._changelist_url(alias, prefix, None, key)}
+                for key, label in (("restorable", "Wiederherstellbar"),
+                                   ("deleted", "Nur geloeschte"),
+                                   ("all", "Alle"))
+            ] if alias else [],
             "can_restore": self._can_restore(request),
             "bulk_url": reverse("admin:s3restore_s3version_bulk"),
             "path_url": reverse("admin:s3restore_s3version_path"),
@@ -302,7 +302,7 @@ class S3VersionAdmin(admin.ModelAdmin):
             raise SuspiciousOperation(f"Hoechstens {BULK_LIMIT} Dateien auf einmal.")
 
         back_url = self._changelist_url(alias, prefix, request.POST.get("marker"),
-                                        request.POST.get("all") == "1")
+                                        request.POST.get("show") or "restorable")
         if not names:
             self.message_user(request, "Keine Datei ausgewaehlt.", messages.WARNING)
             return HttpResponseRedirect(back_url)
@@ -546,6 +546,63 @@ class S3VersionAdmin(admin.ModelAdmin):
                 + "?" + urlencode({"storage": alias, "name": name}))
 
     @staticmethod
+    def _show_mode(request) -> str:
+        """Welcher Filter ist aktiv: restorable (Standard), deleted oder all."""
+        wanted = request.GET.get("show", "").strip()
+        if wanted in ("restorable", "deleted", "all"):
+            return wanted
+        if request.GET.get("all") == "1":       # alte Links bleiben gueltig
+            return "all"
+        return "restorable"
+
+    def _page_rows(self, storage, alias, prefix, marker, show_all):
+        """Eine Seite ab dem Marker; ohne show_all fliegen Dateien ohne
+        aeltere Version raus (dort gibt es nichts zurueckzuholen)."""
+        grouped, next_marker = storage.page_under(
+            prefix, key_marker=marker or None, limit=PAGE_SIZE)
+        rows, hidden = [], 0
+        for name, history in grouped.items():
+            row = self._row(storage, alias, name, history)
+            if not row["restorable"]:
+                hidden += 1
+                if not show_all:
+                    continue
+            rows.append(row)
+        return rows, next_marker, hidden
+
+    def _scan_deleted(self, storage, alias, prefix, marker):
+        """Sucht vorwaerts nach geloeschten Dateien, bis die Seite voll ist.
+
+        Geloeschtes ist meist duenn gesaet -- ein reines Filtern der aktuellen
+        Seite wuerde fast leere Seiten liefern. Nach SCAN_LIMIT durchsuchten
+        Objekten wird abgebrochen, damit ein Request nicht ewig laeuft; die
+        Seite bietet dann einfach "Weiter" ab der letzten Stelle an.
+        """
+        rows, next_marker, scanned, capped = [], None, 0, False
+        for name, history in storage.iter_under(prefix, key_marker=marker or None,
+                                                batch=PAGE_SIZE * 2):
+            scanned += 1
+            row = self._row(storage, alias, name, history)
+            if row["deleted"] and row["restorable"]:
+                rows.append(row)
+            if len(rows) >= PAGE_SIZE or scanned >= SCAN_LIMIT:
+                next_marker = storage.key_for(name)
+                capped = len(rows) < PAGE_SIZE
+                break
+        return rows, next_marker, scanned, capped
+
+    def _row(self, storage, alias, name, history) -> dict:
+        current = next((v for v in history if v.is_latest), history[0])
+        return {
+            "name": name,
+            "count": len(history),
+            "current": current,
+            "deleted": current.is_delete_marker,
+            "restorable": self._restorable(history, current),
+            "url": self._versions_url(alias, name),
+        }
+
+    @staticmethod
     def _restorable(history, current) -> bool:
         """Gibt es hier ueberhaupt etwas zurueckzuholen?
 
@@ -560,12 +617,12 @@ class S3VersionAdmin(admin.ModelAdmin):
 
     @staticmethod
     def _changelist_url(alias: str, prefix: str = "", marker: str | None = None,
-                        show_all: bool = False) -> str:
+                        show: str = "restorable") -> str:
         params = {"storage": alias, "prefix": prefix}
         if marker:
             params["marker"] = marker
-        if show_all:
-            params["all"] = "1"
+        if show and show != "restorable":
+            params["show"] = show
         return (reverse("admin:s3restore_s3version_changelist") + "?" + urlencode(params))
 
     @staticmethod

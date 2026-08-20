@@ -679,16 +679,15 @@ def test_single_version_files_are_hidden(storage, admin_client):
     assert "config/zwei.json" in body
     assert "config/eine.json" not in body
     assert "1 Objekt mit nur einer Version ausgeblendet" in body
-    assert "trotzdem anzeigen" in body
+    assert "Nur geloeschte" in body          # Filterleiste
 
 
 def test_show_all_reveals_them_without_checkbox(storage, admin_client):
     put(storage, "alt", "config/zwei.json"); put(storage, "neu", "config/zwei.json")
     put(storage, "einzig", "config/eine.json")
-    body = admin_client.get(CHANGELIST, {"prefix": "config/", "all": "1"}).content.decode()
+    body = admin_client.get(CHANGELIST, {"prefix": "config/", "show": "all"}).content.decode()
     assert "config/eine.json" in body
     assert body.count('name="names"') == 1          # nur die mit Historie waehlbar
-    assert "ausblenden" in body
 
 
 def test_deleted_file_with_one_version_stays_visible(storage, admin_client):
@@ -711,5 +710,87 @@ def test_filter_survives_paging_links(storage, admin_client):
     for i in range(60):
         storage.s3_client.put_object(Bucket=BUCKET,
                                      Key=storage.key_for(f"config/d{i:03d}.txt"), Body=b"x")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/", "show": "all"}).content.decode()
+    assert "show=all" in next_url(body)
+
+
+# ------------------------------------------------- Filter "nur geloeschte"
+
+def test_filter_bar_is_rendered(storage, admin_client):
+    put(storage, "v1", "config/a.json"); put(storage, "v2", "config/a.json")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    for label in ("Wiederherstellbar", "Nur geloeschte", "Alle"):
+        assert label in body
+    assert "show=deleted" in body and "show=all" in body
+
+
+def test_deleted_filter_shows_only_deleted(storage, admin_client):
+    put(storage, "lebt", "config/a.json"); put(storage, "lebt2", "config/a.json")
+    put(storage, "weg", "config/b.json"); put(storage, "weg2", "config/b.json")
+    storage.delete("config/b.json")
+
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "show": "deleted"}).content.decode()
+    assert "config/b.json" in body and "config/a.json" not in body
+    assert body.count('name="names"') == 1          # bleibt wiederherstellbar
+    assert "geloescht" in body
+
+
+def test_deleted_filter_finds_entries_beyond_first_page(many_files, admin_client):
+    """Der Filter sucht vorwaerts weiter, statt nur die aktuelle Seite zu sieben."""
+    many_files.delete("config/datei-099.txt")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "show": "deleted"}).content.decode()
+    assert "config/datei-099.txt" in body
+    assert body.count('name="names"') == 1
+    assert "120 Objekte dafuer durchsucht" in flat(body)
+
+
+def test_deleted_filter_skips_objects_without_real_version(storage, admin_client):
+    """Nur ein Delete-Marker und sonst nichts -> nichts zurueckzuholen."""
+    put(storage, "v1", "config/a.json")
+    storage.delete("config/a.json")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "show": "deleted"}).content.decode()
+    assert "config/a.json" in body                  # eine echte Version ist da
+
+    versions = storage.versions("config/a.json")
+    real = [v for v in versions if not v.is_delete_marker][0]
+    storage.s3_client.delete_object(Bucket=BUCKET, Key=storage.key_for("config/a.json"),
+                                    VersionId=real.version_id)
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "show": "deleted"}).content.decode()
+    assert "config/a.json" not in body
+    assert "Keine geloeschten Dateien gefunden" in body
+
+
+def test_deleted_filter_reports_scan_cap(many_files, admin_client, monkeypatch):
+    from s3restore import admin as admin_module
+    monkeypatch.setattr(admin_module, "SCAN_LIMIT", 10)
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "show": "deleted"}).content.decode()
+    assert "danach abgebrochen" in flat(body)
+    assert next_url(body)                            # Weitersuchen ab dieser Stelle
+
+
+def test_deleted_filter_survives_paging_and_bulk(storage, admin_client):
+    for i in range(3):
+        name = f"config/weg-{i}.json"
+        put(storage, "alt", name); put(storage, "neu", name)
+        storage.delete(name)
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "show": "deleted"}).content.decode()
+    assert 'name="show" value="deleted"' in body
+
+    admin_client.post(BULK, {"storage": "default", "prefix": "config/",
+                             "show": "deleted", "action": "restore_previous",
+                             "confirm": "yes",
+                             "names": ["config/weg-0.json", "config/weg-1.json"]})
+    assert storage.exists("config/weg-0.json") and storage.exists("config/weg-1.json")
+    assert not storage.exists("config/weg-2.json")
+
+
+def test_old_all_parameter_still_works(storage, admin_client):
+    put(storage, "einzig", "config/eine.json")
     body = admin_client.get(CHANGELIST, {"prefix": "config/", "all": "1"}).content.decode()
-    assert "all=1" in next_url(body)
+    assert "config/eine.json" in body

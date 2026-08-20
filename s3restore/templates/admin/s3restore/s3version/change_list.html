@@ -34,6 +34,13 @@
 
       <input type="submit" value="Anzeigen" class="default" style="margin-left:8px;">
     </form>
+    <p style="margin:10px 0 0;">
+      Anzeigen:
+      {% for f in filters %}
+        <a href="{{ f.url }}" class="button{% if f.active %} default{% endif %}"
+           style="margin-right:4px;{% if not f.active %}background:#eee;color:#333;{% endif %}">{{ f.label }}</a>
+      {% endfor %}
+    </p>
     <p class="help" style="margin:8px 0 0;">
       Bucket <code>{{ bucket }}</code> &middot; es wird nichts geaendert, solange du
       keine Version ausdruecklich wiederherstellst.
@@ -86,7 +93,7 @@
       <input type="hidden" name="storage" value="{{ alias }}">
       <input type="hidden" name="prefix" value="{{ prefix }}">
       <input type="hidden" name="marker" value="{{ marker }}">
-      {% if show_all %}<input type="hidden" name="all" value="1">{% endif %}
+      <input type="hidden" name="show" value="{{ show }}">
 
       {% if can_restore %}
         <div class="actions">
@@ -160,14 +167,15 @@
 
     {% if hidden %}
       <p class="help">
-        {% if show_all %}
-          {{ hidden }} Objekt{{ hidden|pluralize:"e" }} auf dieser Seite
-          {{ hidden|pluralize:"hat,haben" }} nur eine Version &ndash; nichts zum Zuruecksetzen.
-          <a href="{{ toggle_url }}">ausblenden</a>
-        {% else %}
-          {{ hidden }} Objekt{{ hidden|pluralize:"e" }} mit nur einer Version
-          ausgeblendet. <a href="{{ toggle_url }}">trotzdem anzeigen</a>
-        {% endif %}
+        {{ hidden }} Objekt{{ hidden|pluralize:"e" }} mit nur einer Version
+        ausgeblendet &ndash; dort gibt es nichts zurueckzuholen.
+      </p>
+    {% endif %}
+    {% if show == "deleted" %}
+      <p class="help">
+        Nur geloeschte Dateien &ndash; {{ scanned }} Objekt{{ scanned|pluralize:"e" }}
+        dafuer durchsucht{% if scan_capped %}, danach abgebrochen: &bdquo;Weiter&ldquo;
+        sucht ab dieser Stelle weiter{% endif %}.
       </p>
     {% endif %}
     {% if not can_restore %}
@@ -202,10 +210,15 @@
       </script>
     {% endif %}
   {% else %}
-    {% if hidden %}
+    {% if show == "deleted" %}
+      <p class="help">
+        Keine geloeschten Dateien gefunden &ndash; {{ scanned }} Objekt{{ scanned|pluralize:"e" }}
+        durchsucht{% if scan_capped %}, danach abgebrochen{% endif %}.
+      </p>
+    {% elif hidden %}
       <p class="help">
         Auf dieser Seite hat kein Objekt eine aeltere Version
-        ({{ hidden }} ausgeblendet). <a href="{{ toggle_url }}">trotzdem anzeigen</a>
+        ({{ hidden }} ausgeblendet, siehe Filter &bdquo;Alle&ldquo;).
       </p>
     {% else %}
       <p class="help">Keine Objekte unter diesem Praefix gefunden.</p>

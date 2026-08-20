@@ -89,7 +89,15 @@ def test_make_screenshots(live_server):
             page.wait_for_load_state("networkidle")
             page.screenshot(path=f"{IMG}/pfad-bestaetigung.png", full_page=True)
 
-            # 6: Blaettern -- 120 Dateien unter einem zweiten Praefix
+            # 6: Filter "nur geloeschte"
+            time.sleep(1.05)
+            st.delete("netzwerk/photos/zaun.jpg")
+            page.goto(f"{live_server.url}/admin/s3restore/s3version/"
+                      "?prefix=netzwerk/&show=deleted")
+            page.wait_for_load_state("networkidle")
+            page.screenshot(path=f"{IMG}/filter-geloescht.png", full_page=True)
+
+            # 7: Blaettern -- 120 Dateien unter einem zweiten Praefix
             for i in range(120):
                 for body in (b"alt", b"x"):
                     st.s3_client.put_object(Bucket=BUCKET,

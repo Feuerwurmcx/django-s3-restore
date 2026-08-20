@@ -93,11 +93,28 @@ Zwei Details, die dabei leicht schiefgehen:
 Die Checkbox-Auswahl gilt immer nur für die aktuelle Seite; nach einer
 Sammelaktion landest du wieder auf derselben Seite.
 
-Dateien mit **nur einer Version** blendet die Liste aus – dort gibt es nichts
-zurückzuholen. Eine Zeile pro Seite sagt, wie viele das waren, und blendet sie
-auf Wunsch wieder ein (`?all=1`); dann erscheinen sie ohne Checkbox. Gelöschte
-Dateien mit einer verbliebenen Version bleiben sichtbar, denn die lassen sich
+### Filter
+
+Über der Liste stehen drei Filter:
+
+| Filter | Zeigt |
+|---|---|
+| **Wiederherstellbar** (Standard) | alles, wo es eine ältere Version gibt |
+| **Nur gelöschte** | Dateien, deren aktueller Stand ein Delete-Marker ist |
+| **Alle** | zusätzlich Dateien mit nur einer Version, dann ohne Checkbox |
+
+![Filter „nur gelöschte"](docs/img/filter-geloescht.png)
+
+Dateien mit nur einer Version fallen im Standardfilter raus – dort gibt es nichts
+zurückzuholen; eine Zeile unter der Liste sagt, wie viele das waren. Gelöschte
+Dateien mit einer verbliebenen Version bleiben sichtbar, denn genau die will man
 zurückholen.
+
+„Nur gelöschte" siebt nicht bloß die aktuelle Seite: Gelöschtes ist meist dünn
+gesät, deshalb sucht der Filter über Seitengrenzen hinweg weiter, bis 50 Treffer
+beisammen sind. Nach `SCAN_LIMIT` (5000) durchsuchten Objekten bricht er ab,
+damit ein Request nicht ewig läuft – „Weiter" sucht dann ab dieser Stelle weiter.
+Unter der Liste steht jeweils, wie viele Objekte dafür durchsucht wurden.
 
 ### Ganzen Pfad wiederherstellen
 
@@ -218,7 +235,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-107 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
+114 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
 S3-Bucket – kein echtes AWS, keine Credentials nötig.
 
 Die Screenshots oben stammen aus einem Playwright-Durchlauf gegen genau diesen

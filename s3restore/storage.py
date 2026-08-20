@@ -213,14 +213,15 @@ class VersionedS3Storage(S3Boto3Storage):
             hist.sort(key=_sort_key, reverse=True)
         return grouped, next_marker
 
-    def iter_under(self, prefix: str = "", *, batch: int = 200):
+    def iter_under(self, prefix: str = "", *, batch: int = 200,
+                   key_marker: str | None = None):
         """Alle Objekte unter einem Praefix, batchweise ueber den KeyMarker.
 
         Anders als versions_under() haelt das nie den ganzen Praefix im
         Speicher -- gedacht fuer Pfade mit sehr vielen Objekten.
         Liefert (name, history) je Objekt, Keys aufsteigend sortiert.
         """
-        marker = None
+        marker = key_marker
         while True:
             grouped, marker = self.page_under(prefix, key_marker=marker, limit=batch)
             for name, history in grouped.items():
