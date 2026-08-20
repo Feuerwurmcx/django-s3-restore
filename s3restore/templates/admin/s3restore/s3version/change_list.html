@@ -40,12 +40,53 @@
     </p>
   </div>
 
+  {% if can_restore %}
+    <div class="module" style="padding:10px 12px;margin-bottom:14px;">
+      <h2>Ganzen Pfad wiederherstellen</h2>
+      {% if prefix %}
+        <form method="post" action="{{ path_url }}" style="margin-top:8px;">
+          {% csrf_token %}
+          <input type="hidden" name="storage" value="{{ alias }}">
+          <input type="hidden" name="prefix" value="{{ prefix }}">
+          <p style="margin:0 0 6px;">
+            Betrifft alle Objekte unter <code>{{ prefix }}</code> &ndash; auch die auf
+            den folgenden Seiten. Geloeschte Dateien kommen dabei zurueck.
+          </p>
+          <p style="margin:0 0 4px;">
+            <label><input type="radio" name="mode" value="steps" checked>
+              jede Datei eine Version zurueck</label>
+          </p>
+          <p style="margin:0 0 8px;">
+            <label><input type="radio" name="mode" value="at" id="mode-at">
+              Stand vom</label>
+            <input type="datetime-local" name="at" id="id_at" style="margin-left:4px;">
+          </p>
+          <input type="submit" value="Pfad wiederherstellen" class="button">
+        </form>
+        <script>
+          (function () {
+            var at = document.getElementById("id_at");
+            if (at) at.addEventListener("input", function () {
+              document.getElementById("mode-at").checked = true;
+            });
+          })();
+        </script>
+      {% else %}
+        <p class="help" style="margin:8px 0 0;">
+          Gib oben einen Praefix an (z.B. <code>netzwerk/photos/</code>) &ndash; ohne
+          Praefix waere das der ganze Bucket, das gibt es hier nicht auf Knopfdruck.
+        </p>
+      {% endif %}
+    </div>
+  {% endif %}
+
   {% if rows %}
     <form method="post" action="{{ bulk_url }}" id="bulk-form">
       {% csrf_token %}
       <input type="hidden" name="storage" value="{{ alias }}">
       <input type="hidden" name="prefix" value="{{ prefix }}">
       <input type="hidden" name="marker" value="{{ marker }}">
+      {% if show_all %}<input type="hidden" name="all" value="1">{% endif %}
 
       {% if can_restore %}
         <div class="actions">
@@ -81,8 +122,10 @@
               <tr class="{% cycle 'row1' 'row2' %}">
                 {% if can_restore %}
                   <td class="action-checkbox">
-                    <input type="checkbox" name="names" value="{{ row.name }}"
-                           class="action-select" aria-label="{{ row.name }} auswaehlen">
+                    {% if row.restorable %}
+                      <input type="checkbox" name="names" value="{{ row.name }}"
+                             class="action-select" aria-label="{{ row.name }} auswaehlen">
+                    {% endif %}
                   </td>
                 {% endif %}
                 <th scope="row"><a href="{{ row.url }}">{{ row.name }}</a></th>
@@ -114,6 +157,19 @@
         </span>
       </p>
     </form>
+
+    {% if hidden %}
+      <p class="help">
+        {% if show_all %}
+          {{ hidden }} Objekt{{ hidden|pluralize:"e" }} auf dieser Seite
+          {{ hidden|pluralize:"hat,haben" }} nur eine Version &ndash; nichts zum Zuruecksetzen.
+          <a href="{{ toggle_url }}">ausblenden</a>
+        {% else %}
+          {{ hidden }} Objekt{{ hidden|pluralize:"e" }} mit nur einer Version
+          ausgeblendet. <a href="{{ toggle_url }}">trotzdem anzeigen</a>
+        {% endif %}
+      </p>
+    {% endif %}
     {% if not can_restore %}
       <p class="help">Dir fehlt das Recht <code>s3restore.restore_s3version</code>
         &ndash; nur Ansicht.</p>
@@ -146,7 +202,24 @@
       </script>
     {% endif %}
   {% else %}
-    <p class="help">Keine Objekte unter diesem Praefix gefunden.</p>
+    {% if hidden %}
+      <p class="help">
+        Auf dieser Seite hat kein Objekt eine aeltere Version
+        ({{ hidden }} ausgeblendet). <a href="{{ toggle_url }}">trotzdem anzeigen</a>
+      </p>
+    {% else %}
+      <p class="help">Keine Objekte unter diesem Praefix gefunden.</p>
+    {% endif %}
+    {% if next_url or prev_url %}
+      <p class="paginator">
+        {% if prev_url %}
+          <a href="{{ first_url }}">&laquo; Erste</a>
+          <a href="{{ prev_url }}">&lsaquo; Zurueck</a>
+        {% endif %}
+        <span class="this-page">Seite {{ page_number }}</span>
+        {% if next_url %}<a href="{{ next_url }}">Weiter &rsaquo;</a>{% endif %}
+      </p>
+    {% endif %}
   {% endif %}
 
   {% endif %}

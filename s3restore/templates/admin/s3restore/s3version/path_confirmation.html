@@ -1,0 +1,92 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Start</a>
+    &rsaquo; <a href="{% url 'admin:app_list' app_label=opts.app_label %}">{{ opts.app_config.verbose_name }}</a>
+    &rsaquo; <a href="{{ back_url }}">S3-Wiederherstellung</a>
+    &rsaquo; Ganzen Pfad wiederherstellen
+  </div>
+{% endblock %}
+
+{% block content %}
+<div id="content-main">
+
+  <p>
+    Pfad <code>s3://{{ bucket }}/{{ prefix }}</code>
+    {% if at %}
+      auf den Stand vom <b>{{ at|date:"d.m.Y H:i:s" }}</b>
+    {% else %}
+      jeweils eine Version zurueck
+    {% endif %}
+    &ndash; betroffen sind <b>{{ planned_count }}</b> Datei(en).
+  </p>
+
+  {% if planned_count %}
+    <div class="results">
+      <table id="result_list">
+        <thead>
+          <tr>
+            <th scope="col">Objekt</th>
+            <th scope="col">Zielstand</th>
+            <th scope="col">Groesse</th>
+            <th scope="col">Version</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for name, target in preview %}
+            <tr class="{% cycle 'row1' 'row2' %}">
+              <th scope="row">{{ name }}</th>
+              <td>{{ target.last_modified|date:"d.m.Y H:i:s" }}</td>
+              <td>{{ target.size|filesizeformat }}</td>
+              <td><code style="font-size:11px;">{{ target.version_id }}</code></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if more %}
+      <p class="help">&hellip; und {{ more }} weitere, hier nicht einzeln aufgelistet.</p>
+    {% endif %}
+
+    <p class="help">
+      Die alten Versionen werden erneut hochgeladen und damit aktuell; der bisherige
+      Stand bleibt jeweils als Version erhalten. Aktuell geloeschte Dateien sind
+      danach wieder da.
+      {% if at %}
+        Dateien, die es am {{ at|date:"d.m.Y H:i" }} noch nicht gab, bleiben
+        unveraendert bestehen &ndash; es wird nichts geloescht.
+      {% endif %}
+      Bei sehr grossen Pfaden kann das eine Weile dauern.
+    </p>
+  {% else %}
+    <p class="errornote">Unter diesem Pfad gibt es nichts zurueckzusetzen.</p>
+  {% endif %}
+
+  {% if skipped_reasons %}
+    <div class="module" style="padding:10px 12px;margin-top:14px;">
+      <h2>Wird uebersprungen ({{ skipped_count }})</h2>
+      <ul style="margin:8px 0 0 18px;">
+        {% for reason, count in skipped_reasons %}
+          <li>{{ count }}&times; &ndash; {{ reason }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  <form method="post" action="{{ path_url }}">
+    {% csrf_token %}
+    <input type="hidden" name="storage" value="{{ alias }}">
+    <input type="hidden" name="prefix" value="{{ prefix }}">
+    <input type="hidden" name="mode" value="{{ mode }}">
+    <input type="hidden" name="at" value="{{ at_raw }}">
+    <input type="hidden" name="confirm" value="yes">
+    <div class="submit-row">
+      {% if planned_count %}
+        <input type="submit" value="Ja, {{ planned_count }} Datei(en) zuruecksetzen" class="default">
+      {% endif %}
+      <a href="{{ back_url }}" class="closelink">Abbrechen</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

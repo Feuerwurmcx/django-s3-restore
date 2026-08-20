@@ -1,6 +1,7 @@
 """Tests fuer die Admin-Seite zur S3-Wiederherstellung (moto, kein echtes S3)."""
 import re
 import time
+from datetime import datetime
 from html import unescape
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -10,6 +11,7 @@ from django.contrib.admin.models import LogEntry
 from django.contrib.auth.models import Permission, User
 from django.core.files.base import ContentFile
 from django.urls import reverse
+from django.utils import timezone as djtz
 from moto import mock_aws
 
 BUCKET = "garten-backup"
@@ -51,6 +53,11 @@ def put(storage, text, name=NAME):
 def read(storage, name=NAME):
     with storage.open(name) as fh:
         return fh.read().decode()
+
+
+def flat(html: str) -> str:
+    """HTML mit normalisierten Leerzeichen -- Templates umbrechen Saetze."""
+    return re.sub(r"\s+", " ", html)
 
 
 def versions_url(name=NAME, alias="default"):
@@ -245,7 +252,7 @@ def test_bulk_url_resolves():
 def test_changelist_has_checkboxes_and_action(storage, admin_client):
     seed_three(storage)
     body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
-    assert body.count('name="names"') == 3
+    assert body.count('name="names"') == 2          # c.json hat nur eine Version
     assert 'id="action-toggle"' in body
     assert "Vorherige Version wiederherstellen" in body
     assert 'value="restore_previous"' in body
@@ -348,11 +355,12 @@ def test_bulk_needs_restore_permission(storage, client, db):
 
 @pytest.fixture
 def many_files(storage):
-    """120 Objekte mit je einer Version -- schnell per put_object, ohne sleep."""
+    """120 Objekte mit je zwei Versionen -- schnell per put_object, ohne sleep."""
     for i in range(120):
-        storage.s3_client.put_object(
-            Bucket=BUCKET, Key=storage.key_for(f"config/datei-{i:03d}.txt"),
-            Body=b"x")
+        for body in (b"alt", b"x"):
+            storage.s3_client.put_object(
+                Bucket=BUCKET, Key=storage.key_for(f"config/datei-{i:03d}.txt"),
+                Body=body)
     return storage
 
 
@@ -429,7 +437,7 @@ def test_unknown_marker_still_renders(many_files, admin_client):
 
 
 def test_no_paginator_links_for_single_page(storage, admin_client):
-    put(storage, "v1", "config/a.json")
+    put(storage, "v1", "config/a.json"); put(storage, "v2", "config/a.json")
     body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
     assert "1 Objekt auf dieser Seite" in body
     assert not next_url(body) and not prev_url(body)
@@ -448,7 +456,9 @@ def test_bulk_returns_to_same_marker(many_files, admin_client):
         "names": ["config/datei-050.txt"]})
     assert resp.status_code == 302
     assert marker_of(resp["Location"]) == marker
-    assert read(storage, "config/datei-050.txt") == "x"
+    # die beiden Vorgaengerversionen liegen in derselben Sekunde -- Hauptsache,
+    # es ging einen Schritt zurueck
+    assert read(storage, "config/datei-050.txt") in ("x", "alt")
 
 
 def test_bulk_confirmation_keeps_marker(many_files, admin_client):
@@ -504,3 +514,202 @@ def test_page_under_skips_marker_key_itself(storage):
         storage.s3_client.put_object(Bucket=BUCKET, Key=storage.key_for(name), Body=b"x")
     grouped, _ = storage.page_under("config/", key_marker="media/config/a.txt", limit=50)
     assert list(grouped) == ["config/b.txt"]
+
+
+# ------------------------------------------------- Ganzen Pfad wiederherstellen
+
+PATH_URL = "/admin/s3restore/s3version/path/"
+
+
+@pytest.fixture
+def photo_path(storage):
+    """netzwerk/photos/ mit Unterordner, zwei Versionen je Datei."""
+    for name in ("netzwerk/photos/a.jpg", "netzwerk/photos/2024/b.jpg",
+                 "netzwerk/docs/c.pdf"):
+        put(storage, "alt", name)
+    for name in ("netzwerk/photos/a.jpg", "netzwerk/photos/2024/b.jpg",
+                 "netzwerk/docs/c.pdf"):
+        put(storage, "neu", name)
+    return storage
+
+
+def test_path_url_resolves():
+    assert reverse("admin:s3restore_s3version_path") == PATH_URL
+
+
+def test_changelist_offers_path_form_with_prefix(photo_path, admin_client):
+    body = admin_client.get(CHANGELIST, {"prefix": "netzwerk/photos/"}).content.decode()
+    assert "Ganzen Pfad wiederherstellen" in body
+    assert 'name="mode" value="steps"' in body and 'name="mode" value="at"' in body
+    assert 'type="datetime-local"' in body
+
+
+def test_changelist_without_prefix_explains_instead(photo_path, admin_client):
+    body = admin_client.get(CHANGELIST).content.decode()
+    assert "Gib oben einen Praefix an" in body
+    assert 'name="mode" value="steps"' not in body
+
+
+def test_path_confirmation_counts_recursively(photo_path, admin_client):
+    body = admin_client.post(PATH_URL, {"storage": "default",
+                                        "prefix": "netzwerk/photos/",
+                                        "mode": "steps"}).content.decode()
+    assert "Ja, 2 Datei(en) zuruecksetzen" in body
+    assert "netzwerk/photos/a.jpg" in body and "netzwerk/photos/2024/b.jpg" in body
+    assert "netzwerk/docs/c.pdf" not in body
+    assert read(photo_path, "netzwerk/photos/a.jpg") == "neu"   # noch nichts passiert
+
+
+def test_path_restores_whole_subtree(photo_path, admin_client):
+    resp = admin_client.post(PATH_URL, {"storage": "default",
+                                        "prefix": "netzwerk/photos/",
+                                        "mode": "steps", "confirm": "yes"}, follow=True)
+    assert read(photo_path, "netzwerk/photos/a.jpg") == "alt"
+    assert read(photo_path, "netzwerk/photos/2024/b.jpg") == "alt"
+    assert read(photo_path, "netzwerk/docs/c.pdf") == "neu"     # anderer Pfad
+    assert "2 Datei(en) auf die jeweils vorherige Version zurueckgesetzt" in resp.content.decode()
+
+
+def test_path_brings_deleted_files_back(photo_path, admin_client):
+    photo_path.delete("netzwerk/photos/a.jpg")
+    assert not photo_path.exists("netzwerk/photos/a.jpg")
+    admin_client.post(PATH_URL, {"storage": "default", "prefix": "netzwerk/photos/",
+                                 "mode": "steps", "confirm": "yes"})
+    assert photo_path.exists("netzwerk/photos/a.jpg")
+    assert read(photo_path, "netzwerk/photos/a.jpg") == "neu"   # juengste echte Version
+
+
+def test_path_point_in_time(storage, admin_client):
+    put(storage, "a-alt", "netzwerk/photos/a.jpg")
+    put(storage, "b-alt", "netzwerk/photos/b.jpg")
+    marker = djtz.localtime().replace(microsecond=0)
+    put(storage, "a-neu", "netzwerk/photos/a.jpg")
+    put(storage, "b-neu", "netzwerk/photos/b.jpg")
+
+    resp = admin_client.post(PATH_URL, {
+        "storage": "default", "prefix": "netzwerk/photos/", "mode": "at",
+        "at": marker.strftime("%Y-%m-%dT%H:%M:%S"), "confirm": "yes"}, follow=True)
+    assert read(storage, "netzwerk/photos/a.jpg") == "a-alt"
+    assert read(storage, "netzwerk/photos/b.jpg") == "b-alt"
+    assert "auf den Stand vom" in resp.content.decode()
+
+
+def test_path_point_in_time_skips_younger_files(storage, admin_client):
+    put(storage, "alt", "netzwerk/photos/a.jpg")
+    marker = djtz.localtime().replace(microsecond=0)
+    put(storage, "neu", "netzwerk/photos/a.jpg")
+    put(storage, "spaeter", "netzwerk/photos/neu.jpg")          # gab es damals nicht
+
+    body = admin_client.post(PATH_URL, {
+        "storage": "default", "prefix": "netzwerk/photos/", "mode": "at",
+        "at": marker.strftime("%Y-%m-%dT%H:%M:%S")}).content.decode()
+    assert "Ja, 1 Datei(en) zuruecksetzen" in body
+    assert "existierte zu diesem Zeitpunkt noch nicht" in body
+
+    admin_client.post(PATH_URL, {
+        "storage": "default", "prefix": "netzwerk/photos/", "mode": "at",
+        "at": marker.strftime("%Y-%m-%dT%H:%M:%S"), "confirm": "yes"})
+    assert read(storage, "netzwerk/photos/a.jpg") == "alt"
+    assert read(storage, "netzwerk/photos/neu.jpg") == "spaeter"   # bleibt bestehen
+
+
+def test_path_skips_single_version_files(storage, admin_client):
+    put(storage, "einzig", "netzwerk/photos/a.jpg")
+    body = admin_client.post(PATH_URL, {"storage": "default",
+                                        "prefix": "netzwerk/photos/",
+                                        "mode": "steps"}).content.decode()
+    assert "nichts zurueckzusetzen" in body
+    assert "es gibt nur eine Version" in body
+
+
+def test_path_writes_log_entry_per_file(photo_path, admin_client):
+    admin_client.post(PATH_URL, {"storage": "default", "prefix": "netzwerk/photos/",
+                                 "mode": "steps", "confirm": "yes"})
+    assert sorted(LogEntry.objects.values_list("object_id", flat=True)) == [
+        "netzwerk/photos/2024/b.jpg", "netzwerk/photos/a.jpg"]
+
+
+def test_path_preview_is_capped(photo_path, admin_client, monkeypatch):
+    from s3restore import admin as admin_module
+    monkeypatch.setattr(admin_module, "PATH_PREVIEW", 1)
+    body = admin_client.post(PATH_URL, {"storage": "default",
+                                        "prefix": "netzwerk/photos/",
+                                        "mode": "steps"}).content.decode()
+    assert "und 1 weitere" in body
+
+
+def test_path_rejects_bad_timestamp(photo_path, admin_client):
+    resp = admin_client.post(PATH_URL, {"storage": "default",
+                                        "prefix": "netzwerk/photos/",
+                                        "mode": "at", "at": "gestern"}, follow=True)
+    assert "kein gueltiger Zeitpunkt" in resp.content.decode()
+    assert read(photo_path, "netzwerk/photos/a.jpg") == "neu"
+
+
+def test_path_without_prefix_does_nothing(photo_path, admin_client):
+    resp = admin_client.post(PATH_URL, {"storage": "default", "prefix": "",
+                                        "mode": "steps", "confirm": "yes"}, follow=True)
+    assert "Bitte erst einen Praefix angeben" in resp.content.decode()
+    assert read(photo_path, "netzwerk/photos/a.jpg") == "neu"
+
+
+def test_path_rejects_get_and_unknown_mode(photo_path, admin_client):
+    assert admin_client.get(PATH_URL).status_code == 400
+    assert admin_client.post(PATH_URL, {"storage": "default", "prefix": "netzwerk/",
+                                        "mode": "loeschen"}).status_code == 400
+
+
+def test_path_needs_restore_permission(photo_path, client, db):
+    user = User.objects.create_user("leser3", password="pw", is_staff=True)
+    user.user_permissions.add(Permission.objects.get(codename="view_s3version"))
+    client.force_login(user)
+    body = client.get(CHANGELIST, {"prefix": "netzwerk/photos/"}).content.decode()
+    assert "Ganzen Pfad wiederherstellen" not in body
+    assert client.post(PATH_URL, {"storage": "default", "prefix": "netzwerk/photos/",
+                                  "mode": "steps", "confirm": "yes"}).status_code == 403
+    assert read(photo_path, "netzwerk/photos/a.jpg") == "neu"
+
+
+# ------------------------- Dateien mit nur einer Version aus der Liste filtern
+
+def test_single_version_files_are_hidden(storage, admin_client):
+    put(storage, "alt", "config/zwei.json"); put(storage, "neu", "config/zwei.json")
+    put(storage, "einzig", "config/eine.json")
+    body = flat(admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode())
+    assert "config/zwei.json" in body
+    assert "config/eine.json" not in body
+    assert "1 Objekt mit nur einer Version ausgeblendet" in body
+    assert "trotzdem anzeigen" in body
+
+
+def test_show_all_reveals_them_without_checkbox(storage, admin_client):
+    put(storage, "alt", "config/zwei.json"); put(storage, "neu", "config/zwei.json")
+    put(storage, "einzig", "config/eine.json")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/", "all": "1"}).content.decode()
+    assert "config/eine.json" in body
+    assert body.count('name="names"') == 1          # nur die mit Historie waehlbar
+    assert "ausblenden" in body
+
+
+def test_deleted_file_with_one_version_stays_visible(storage, admin_client):
+    """Geloescht + eine echte Version = wiederherstellbar, also nicht ausblenden."""
+    put(storage, "v1", "config/weg.json")
+    storage.delete("config/weg.json")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    assert "config/weg.json" in body and "geloescht" in body
+    assert body.count('name="names"') == 1
+
+
+def test_page_with_only_single_version_files_keeps_navigation(storage, admin_client):
+    put(storage, "einzig", "config/eine.json")
+    body = flat(admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode())
+    assert "kein Objekt eine aeltere Version" in body
+    assert "Keine Objekte unter diesem Praefix gefunden" not in body
+
+
+def test_filter_survives_paging_links(storage, admin_client):
+    for i in range(60):
+        storage.s3_client.put_object(Bucket=BUCKET,
+                                     Key=storage.key_for(f"config/d{i:03d}.txt"), Body=b"x")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/", "all": "1"}).content.decode()
+    assert "all=1" in next_url(body)

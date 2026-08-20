@@ -76,11 +76,25 @@ def test_make_screenshots(live_server):
             page.screenshot(path=f"{IMG}/erfolg.png", full_page=True)
             assert "zurueckgesetzt" in page.content()
 
-            # 5: Blaettern -- 120 Dateien unter einem zweiten Praefix
+            # 5: Pfad-Rollback -- Formular und Bestaetigungsseite
+            for name in ("netzwerk/photos/strand.jpg", "netzwerk/photos/2024/beet.jpg",
+                         "netzwerk/photos/zaun.jpg"):
+                for text in ("alt", "neu"):
+                    time.sleep(1.05)
+                    st.save(name, ContentFile(text.encode()))
+            page.goto(f"{live_server.url}/admin/s3restore/s3version/?prefix=netzwerk/photos/")
+            page.wait_for_load_state("networkidle")
+            page.screenshot(path=f"{IMG}/pfad-formular.png", full_page=True)
+            page.click("input[value='Pfad wiederherstellen']")
+            page.wait_for_load_state("networkidle")
+            page.screenshot(path=f"{IMG}/pfad-bestaetigung.png", full_page=True)
+
+            # 6: Blaettern -- 120 Dateien unter einem zweiten Praefix
             for i in range(120):
-                st.s3_client.put_object(Bucket=BUCKET,
-                                        Key=st.key_for(f"logs/lauf-{i:03d}.txt"),
-                                        Body=b"x")
+                for body in (b"alt", b"x"):
+                    st.s3_client.put_object(Bucket=BUCKET,
+                                            Key=st.key_for(f"logs/lauf-{i:03d}.txt"),
+                                            Body=body)
             page.goto(f"{live_server.url}/admin/s3restore/s3version/?prefix=logs/")
             page.wait_for_load_state("networkidle")
             page.click("text=Weiter")

@@ -23,6 +23,7 @@ Bestaetigungsseite -- ein GET aendert nie etwas.
 
 from __future__ import annotations
 
+from collections import Counter
 from urllib.parse import urlencode
 
 from django.conf import settings
@@ -34,6 +35,7 @@ from django.http import Http404, HttpResponseRedirect
 from django.shortcuts import render
 from django.urls import path, reverse
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.utils.html import format_html
 
 from .models import S3Version
@@ -53,6 +55,7 @@ except ImportError:  # pragma: no cover
 
 PAGE_SIZE = 50       # Objekte pro Seite (ein S3-Batch ab dem KeyMarker)
 BULK_LIMIT = 200     # so viele Dateien nimmt die Sammelaktion hoechstens entgegen
+PATH_PREVIEW = 200   # so viele Zeilen zeigt die Pfad-Bestaetigung konkret
 SESSION_KEY = "s3restore_markers"   # Kette der Seiten-Startmarker je Praefix
 MARKER_STACK_LIMIT = 500            # so viele Seiten merkt sich die Session
 
@@ -109,6 +112,8 @@ class S3VersionAdmin(admin.ModelAdmin):
                  name="%s_%s_restore" % info),
             path("bulk/", self.admin_site.admin_view(self.bulk_view),
                  name="%s_%s_bulk" % info),
+            path("path/", self.admin_site.admin_view(self.path_view),
+                 name="%s_%s_path" % info),
             *super().get_urls(),
         ]
 
@@ -123,7 +128,8 @@ class S3VersionAdmin(admin.ModelAdmin):
         prefix = request.GET.get("prefix", "").strip()
 
         marker = request.GET.get("marker", "").strip()
-        rows, next_marker, page_number, prev_marker = [], None, 1, None
+        show_all = request.GET.get("all") == "1"
+        rows, next_marker, page_number, prev_marker, hidden = [], None, 1, None, 0
         if alias:
             storage = _get_storage(alias)
             grouped = {}
@@ -137,11 +143,16 @@ class S3VersionAdmin(admin.ModelAdmin):
 
             for name, history in grouped.items():
                 current = next((v for v in history if v.is_latest), history[0])
+                if not self._restorable(history, current):
+                    hidden += 1
+                    if not show_all:
+                        continue
                 rows.append({
                     "name": name,
                     "count": len(history),
                     "current": current,
                     "deleted": current.is_delete_marker,
+                    "restorable": self._restorable(history, current),
                     "url": self._versions_url(alias, name),
                 })
 
@@ -157,13 +168,17 @@ class S3VersionAdmin(admin.ModelAdmin):
             "page_size": PAGE_SIZE,
             "page_number": page_number,
             "marker": marker,
-            "first_url": self._changelist_url(alias, prefix) if alias else "",
-            "prev_url": (self._changelist_url(alias, prefix, prev_marker)
+            "first_url": self._changelist_url(alias, prefix, None, show_all) if alias else "",
+            "prev_url": (self._changelist_url(alias, prefix, prev_marker, show_all)
                          if prev_marker is not None else ""),
-            "next_url": (self._changelist_url(alias, prefix, next_marker)
+            "next_url": (self._changelist_url(alias, prefix, next_marker, show_all)
                          if next_marker else ""),
+            "show_all": show_all,
+            "hidden": hidden,
+            "toggle_url": self._changelist_url(alias, prefix, marker, not show_all),
             "can_restore": self._can_restore(request),
             "bulk_url": reverse("admin:s3restore_s3version_bulk"),
+            "path_url": reverse("admin:s3restore_s3version_path"),
             **(extra_context or {}),
         }
         return render(request, "admin/s3restore/s3version/change_list.html", context)
@@ -286,7 +301,8 @@ class S3VersionAdmin(admin.ModelAdmin):
         if len(names) > BULK_LIMIT:
             raise SuspiciousOperation(f"Hoechstens {BULK_LIMIT} Dateien auf einmal.")
 
-        back_url = self._changelist_url(alias, prefix, request.POST.get("marker"))
+        back_url = self._changelist_url(alias, prefix, request.POST.get("marker"),
+                                        request.POST.get("all") == "1")
         if not names:
             self.message_user(request, "Keine Datei ausgewaehlt.", messages.WARNING)
             return HttpResponseRedirect(back_url)
@@ -362,6 +378,142 @@ class S3VersionAdmin(admin.ModelAdmin):
 
         return HttpResponseRedirect(back_url)
 
+    def path_view(self, request):
+        """Ganzen Pfad wiederherstellen, z.B. netzwerk/photos/.
+
+        Zwei Modi: jede Datei eine Version zurueck, oder Stand zu einem
+        Zeitpunkt. Dateien, die aktuell geloescht sind, kommen dabei zurueck.
+        Der Pfad wird batchweise durchlaufen, nicht am Stueck geladen.
+        """
+        if request.method != "POST":
+            raise SuspiciousOperation("Pfad-Rollback nur per POST.")
+        if not self._can_restore(request):
+            raise PermissionDenied
+
+        aliases = versioned_aliases()
+        alias = self._alias(request, aliases, source=request.POST)
+        prefix = request.POST.get("prefix", "").strip()
+        mode = request.POST.get("mode", "steps").strip()
+        at_raw = request.POST.get("at", "").strip()
+
+        if not alias:
+            raise SuspiciousOperation("Kein Storage angegeben.")
+        if mode not in ("steps", "at"):
+            raise SuspiciousOperation(f"Unbekannter Modus '{mode}'.")
+        if not prefix:
+            # Ohne Praefix waere das ein Rollback des ganzen Buckets -- das
+            # passiert hier nicht aus Versehen.
+            self.message_user(request, "Bitte erst einen Praefix angeben.",
+                              messages.WARNING)
+            return HttpResponseRedirect(self._changelist_url(alias, ""))
+
+        at = None
+        if mode == "at":
+            at = self._parse_at(at_raw)
+            if at is None:
+                self.message_user(
+                    request,
+                    f"'{at_raw}' ist kein gueltiger Zeitpunkt (z.B. 2026-08-18 18:00).",
+                    messages.ERROR)
+                return HttpResponseRedirect(self._changelist_url(alias, prefix))
+
+        storage = _get_storage(alias)
+        try:
+            planned, skipped = self._plan_path(storage, prefix, at)
+        except RestoreError as exc:
+            self.message_user(request, str(exc), messages.ERROR)
+            return HttpResponseRedirect(self._changelist_url(alias, prefix))
+
+        # Schritt 1: Bestaetigungsseite
+        if request.POST.get("confirm") != "yes":
+            reasons = Counter(reason for _, reason in skipped)
+            context = {
+                **self.admin_site.each_context(request),
+                "title": "Ganzen Pfad wiederherstellen?",
+                "opts": self.model._meta,
+                "alias": alias,
+                "bucket": storage.bucket_name,
+                "prefix": prefix,
+                "mode": mode,
+                "at": at,
+                "at_raw": at_raw,
+                "planned_count": len(planned),
+                "preview": planned[:PATH_PREVIEW],
+                "more": max(len(planned) - PATH_PREVIEW, 0),
+                "skipped_reasons": sorted(reasons.items(), key=lambda r: -r[1]),
+                "skipped_count": len(skipped),
+                "path_url": reverse("admin:s3restore_s3version_path"),
+                "back_url": self._changelist_url(alias, prefix),
+            }
+            return render(request, "admin/s3restore/s3version/path_confirmation.html",
+                          context)
+
+        # Schritt 2: ausfuehren
+        done, failed = 0, 0
+        for name, target in planned:
+            result = storage.restore(name, version_id=target.version_id)
+            if result.action == "restored":
+                done += 1
+                self._log(request, alias, name, target)
+            elif result.action == "failed":
+                failed += 1
+                if failed <= 10:      # nicht hunderte Meldungen stapeln
+                    self.message_user(request, f"{name}: {result.reason}", messages.ERROR)
+
+        stand = (f"den Stand vom {timezone.localtime(at):%d.%m.%Y %H:%M}"
+                 if at else "die jeweils vorherige Version")
+        if done:
+            self.message_user(
+                request,
+                f"{prefix}: {done} Datei(en) auf {stand} zurueckgesetzt"
+                + (f", {len(skipped)} uebersprungen" if skipped else "") + ".",
+                messages.SUCCESS)
+        else:
+            self.message_user(request, f"{prefix}: nichts geaendert.", messages.WARNING)
+        if failed > 10:
+            self.message_user(request, f"... und {failed - 10} weitere Fehler.",
+                              messages.ERROR)
+
+        return HttpResponseRedirect(self._changelist_url(alias, prefix))
+
+    @staticmethod
+    def _plan_path(storage, prefix, at):
+        """Was wuerde im Pfad passieren? -> (planned, skipped)"""
+        planned, skipped = [], []
+        for name, history in storage.iter_under(prefix):
+            current = next((v for v in history if v.is_latest), history[0])
+            real = [v for v in history if not v.is_delete_marker]
+            if not real:
+                skipped.append((name, "nur Delete-Marker, keine Daten zum Zurueckholen"))
+                continue
+            if at is None and len(real) == 1 and not current.is_delete_marker:
+                skipped.append((name, "es gibt nur eine Version"))
+                continue
+            try:
+                target = storage.pick(history, steps=None if at else 1, at=at)
+            except RestoreError:
+                skipped.append((name, "existierte zu diesem Zeitpunkt noch nicht"))
+                continue
+            if target.is_delete_marker:
+                skipped.append((name, "war zu diesem Zeitpunkt geloescht"))
+            elif target.is_latest:
+                skipped.append((name, "steht schon auf diesem Stand"))
+            else:
+                planned.append((name, target))
+        return planned, skipped
+
+    @staticmethod
+    def _parse_at(value: str):
+        """'2026-08-18T18:00' oder '2026-08-18 18:00' -> aware datetime."""
+        if not value:
+            return None
+        parsed = parse_datetime(value.replace(" ", "T"))
+        if parsed is None:
+            return None
+        if timezone.is_naive(parsed):
+            parsed = timezone.make_aware(parsed, timezone.get_current_timezone())
+        return parsed
+
     # ------------------------------------------------------------------ Helfer
     @staticmethod
     def _alias(request, aliases: list[str], source=None) -> str | None:
@@ -394,10 +546,26 @@ class S3VersionAdmin(admin.ModelAdmin):
                 + "?" + urlencode({"storage": alias, "name": name}))
 
     @staticmethod
-    def _changelist_url(alias: str, prefix: str = "", marker: str | None = None) -> str:
+    def _restorable(history, current) -> bool:
+        """Gibt es hier ueberhaupt etwas zurueckzuholen?
+
+        Nein bei genau einer Version (der aktuellen) und bei reinen
+        Delete-Marker-Leichen. Ja, wenn es eine aeltere Version gibt -- oder
+        wenn die Datei aktuell geloescht ist und es eine echte Version gibt.
+        """
+        real = [v for v in history if not v.is_delete_marker]
+        if not real:
+            return False
+        return len(real) > 1 or current.is_delete_marker
+
+    @staticmethod
+    def _changelist_url(alias: str, prefix: str = "", marker: str | None = None,
+                        show_all: bool = False) -> str:
         params = {"storage": alias, "prefix": prefix}
         if marker:
             params["marker"] = marker
+        if show_all:
+            params["all"] = "1"
         return (reverse("admin:s3restore_s3version_changelist") + "?" + urlencode(params))
 
     @staticmethod

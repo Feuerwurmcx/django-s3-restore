@@ -213,6 +213,21 @@ class VersionedS3Storage(S3Boto3Storage):
             hist.sort(key=_sort_key, reverse=True)
         return grouped, next_marker
 
+    def iter_under(self, prefix: str = "", *, batch: int = 200):
+        """Alle Objekte unter einem Praefix, batchweise ueber den KeyMarker.
+
+        Anders als versions_under() haelt das nie den ganzen Praefix im
+        Speicher -- gedacht fuer Pfade mit sehr vielen Objekten.
+        Liefert (name, history) je Objekt, Keys aufsteigend sortiert.
+        """
+        marker = None
+        while True:
+            grouped, marker = self.page_under(prefix, key_marker=marker, limit=batch)
+            for name, history in grouped.items():
+                yield name, history
+            if not marker:
+                return
+
     def _versions_in(self, response) -> list[Version]:
         """Versionen und Delete-Marker einer list_object_versions-Antwort."""
         out = []
@@ -296,7 +311,7 @@ class VersionedS3Storage(S3Boto3Storage):
                     dry_run: bool = False) -> list[RestoreResult]:
         """Wie restore(), aber fuer alle Objekte unter einem Praefix."""
         results = []
-        for name, history in sorted(self.versions_under(prefix).items()):
+        for name, history in self.iter_under(prefix):
             results.append(self._restore_from(
                 name, history, steps=steps, version_id=None, at=at,
                 restore_deletes=restore_deletes, dry_run=dry_run))

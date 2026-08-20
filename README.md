@@ -93,6 +93,36 @@ Zwei Details, die dabei leicht schiefgehen:
 Die Checkbox-Auswahl gilt immer nur für die aktuelle Seite; nach einer
 Sammelaktion landest du wieder auf derselben Seite.
 
+Dateien mit **nur einer Version** blendet die Liste aus – dort gibt es nichts
+zurückzuholen. Eine Zeile pro Seite sagt, wie viele das waren, und blendet sie
+auf Wunsch wieder ein (`?all=1`); dann erscheinen sie ohne Checkbox. Gelöschte
+Dateien mit einer verbliebenen Version bleiben sichtbar, denn die lassen sich
+zurückholen.
+
+### Ganzen Pfad wiederherstellen
+
+Für ein komplettes Verzeichnis – etwa `netzwerk/photos/` – gibt es über der Liste
+ein eigenes Formular. Es betrifft **alle** Objekte unter dem Präfix, rekursiv,
+auch die auf den folgenden Seiten, und kennt zwei Zielstände:
+
+* **jede Datei eine Version zurück**
+* **Stand vom `<Datum/Uhrzeit>`** – der Pfad geht auf den Zustand zu diesem
+  Zeitpunkt zurück
+
+![Pfad-Formular](docs/img/pfad-formular.png)
+
+Die Bestätigungsseite zeigt die betroffenen Dateien mit Zielstand (die ersten 200
+einzeln, der Rest gezählt) und darunter gruppiert, was warum übersprungen wird:
+
+![Pfad-Bestätigung](docs/img/pfad-bestaetigung.png)
+
+Aktuell gelöschte Dateien kommen dabei zurück. Beim Zeitpunkt-Modus bleiben
+Dateien, die es damals noch nicht gab, unverändert bestehen – es wird nichts
+gelöscht. Ohne Präfix passiert nichts: ein Rollback des gesamten Buckets gibt es
+hier nicht auf Knopfdruck. Sehr große Pfade laufen ohne Limit durch, können also
+in den Request-Timeout des Webservers rennen – dafür ist der Management-Command
+mit `--prefix` die bessere Wahl.
+
 ### Sammelaktion
 
 Jede Zeile hat eine Checkbox (inklusive „alles auswählen" im Tabellenkopf). Mit der
@@ -188,7 +218,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-87 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
+107 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
 S3-Bucket – kein echtes AWS, keine Credentials nötig.
 
 Die Screenshots oben stammen aus einem Playwright-Durchlauf gegen genau diesen
