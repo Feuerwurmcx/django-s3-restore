@@ -1,0 +1,96 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        booleanParam(name: 'BUILD_ALL', defaultValue: false,
+                     description: 'Alle Pakete bauen statt nur der geänderten')
+        booleanParam(name: 'SKIP_UPLOAD', defaultValue: false,
+                     description: 'Nur packen, kein Nexus-Upload (Dry-Run)')
+    }
+
+    environment {
+        NEXUS_URL  = 'https://nexus.example.com'
+        NEXUS_REPO = 'python-raw'
+        NEXUS_CRED = credentials('nexus-raw-deploy')   // Username/Password-Credential in Jenkins
+    }
+
+    stages {
+
+        stage('Setup') {
+            steps {
+                script {
+                    // Version: <git-beschreibung>-<build> , z.B. 1.4.2-3-gabc1234-b57 oder abc1234-b57
+                    def describe = sh(returnStdout: true, script:
+                        'git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD'
+                    ).trim()
+                    env.VERSION = "${describe}-b${env.BUILD_NUMBER}"
+
+                    // Basis für den Diff: letzter erfolgreicher Build (Git-Plugin setzt das),
+                    // sonst HEAD~1, sonst leer -> alles bauen
+                    def base = params.BUILD_ALL ? '' :
+                        (env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: sh(returnStdout: true, script:
+                            'git rev-parse HEAD~1 2>/dev/null || true').trim())
+
+                    def out = sh(returnStdout: true, script: "ci/changed-packages.sh '${base}'").trim()
+                    env.CHANGED = out
+                    def pkgs = out ? out.split('\n') as List : []
+
+                    echo "Version : ${env.VERSION}"
+                    echo "Basis   : ${base ?: '(keine – alles)'}"
+                    echo "Pakete  : ${pkgs.join(', ') ?: '(keine Änderungen)'}"
+
+                    if (pkgs.isEmpty()) {
+                        currentBuild.result = 'SUCCESS'
+                        currentBuild.description = 'keine Paketänderungen'
+                    } else {
+                        currentBuild.description = "${env.VERSION} – ${pkgs.size()} Paket(e)"
+                    }
+                }
+            }
+        }
+
+        stage('Pack & Publish') {
+            when { expression { env.CHANGED?.trim() } }
+            steps {
+                script {
+                    def pkgs = env.CHANGED.trim().split('\n') as List
+
+                    parallel pkgs.collectEntries { pkg ->
+                        [ (pkg): {
+                            stage(pkg) {
+                                def archive = sh(returnStdout: true,
+                                    script: "ci/pack.sh '${pkg}' '${env.VERSION}'").trim()
+
+                                if (params.SKIP_UPLOAD) {
+                                    echo "SKIP_UPLOAD gesetzt – ${archive} nicht hochgeladen"
+                                } else {
+                                    withEnv([
+                                        "NEXUS_USER=${env.NEXUS_CRED_USR}",
+                                        "NEXUS_PASS=${env.NEXUS_CRED_PSW}"
+                                    ]) {
+                                        sh "ci/upload-nexus.sh '${archive}' '${pkg}' '${env.VERSION}'"
+                                    }
+                                }
+                            }
+                        }]
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'dist/*.tar.gz', allowEmptyArchive: true, fingerprint: true
+        }
+        cleanup {
+            sh 'rm -rf dist'
+        }
+    }
+}
