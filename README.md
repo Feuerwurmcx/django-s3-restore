@@ -95,7 +95,8 @@ Sammelaktion landest du wieder auf derselben Seite.
 
 ### Filter
 
-Über der Liste stehen vier Filter:
+Rechts steht die gewohnte Admin-Filterleiste („Filter → Nach Zustand") mit vier
+Einträgen:
 
 | Filter | Zeigt |
 |---|---|
@@ -106,7 +107,12 @@ Sammelaktion landest du wieder auf derselben Seite.
 
 ![Filter „nur gelöschte"](docs/img/filter-geloescht.png)
 
-![Filter „ohne gelöschte"](docs/img/filter-ohne-geloeschte.png)
+Das ist bewusst **nicht** Djangos `list_filter`: die Filter-Maschinerie hängt an
+der `ChangeList`, die ein QuerySet erwartet – sie ruft `get_queryset()`, zählt für
+die Pagination und reicht das QuerySet durch jeden `SimpleListFilter`. Hier kommen
+die Daten aber live aus S3 und `S3Version` hat gar keine Tabelle. Gerendert wird
+deshalb nur das Markup des Standard-Admins (`#changelist-filter`, `changelists.css`),
+mit Links statt Lookups – vertraut anzusehen, ohne DB darunter.
 
 Unter der Liste steht jeweils, was der Filter weggenommen hat – gelöschte Dateien
 und solche ohne ältere Version werden getrennt gezählt.
@@ -241,7 +247,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-118 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
+120 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
 S3-Bucket – kein echtes AWS, keine Credentials nötig.
 
 Die Screenshots oben stammen aus einem Playwright-Durchlauf gegen genau diesen

@@ -1,5 +1,14 @@
 {% extends "admin/base_site.html" %}
-{% load i18n %}
+{% load i18n static %}
+
+{# changelists.css bringt das Flex-Layout und die Filterspalte -- base_site.html
+   laedt sie nicht mit, weil wir keine echte ChangeList rendern. #}
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin/css/changelists.css' %}">
+{% endblock %}
+
+{% block bodyclass %}{{ block.super }} app-{{ opts.app_label }} model-{{ opts.model_name }} change-list{% endblock %}
 
 {% block breadcrumbs %}
   <div class="breadcrumbs">
@@ -19,227 +28,248 @@
     </p>
   {% else %}
 
-  <div class="module" id="changelist-filter-form" style="padding:10px 12px;margin-bottom:14px;">
-    <form method="get">
-      <label for="id_storage" style="margin-right:6px;">Storage</label>
-      <select name="storage" id="id_storage">
-        {% for a in aliases %}
-          <option value="{{ a }}" {% if a == alias %}selected{% endif %}>{{ a }}</option>
-        {% endfor %}
-      </select>
+  <div id="changelist" class="module{% if filters %} filtered{% endif %}">
+    <div class="changelist-form-container">
 
-      <label for="id_prefix" style="margin:0 6px 0 16px;">Praefix</label>
-      <input type="text" name="prefix" id="id_prefix" value="{{ prefix }}"
-             size="40" placeholder="z.B. config/  (leer = alles)">
-
-      <input type="submit" value="Anzeigen" class="default" style="margin-left:8px;">
-    </form>
-    <p style="margin:10px 0 0;">
-      Anzeigen:
-      {% for f in filters %}
-        <a href="{{ f.url }}" class="button{% if f.active %} default{% endif %}"
-           style="margin-right:4px;{% if not f.active %}background:#eee;color:#333;{% endif %}">{{ f.label }}</a>
-      {% endfor %}
-    </p>
-    <p class="help" style="margin:8px 0 0;">
-      Bucket <code>{{ bucket }}</code> &middot; es wird nichts geaendert, solange du
-      keine Version ausdruecklich wiederherstellst.
-    </p>
-  </div>
-
-  {% if can_restore %}
-    <div class="module" style="padding:10px 12px;margin-bottom:14px;">
-      <h2>Ganzen Pfad wiederherstellen</h2>
-      {% if prefix %}
-        <form method="post" action="{{ path_url }}" style="margin-top:8px;">
-          {% csrf_token %}
-          <input type="hidden" name="storage" value="{{ alias }}">
-          <input type="hidden" name="prefix" value="{{ prefix }}">
-          <p style="margin:0 0 6px;">
-            Betrifft alle Objekte unter <code>{{ prefix }}</code> &ndash; auch die auf
-            den folgenden Seiten. Geloeschte Dateien kommen dabei zurueck.
-          </p>
-          <p style="margin:0 0 4px;">
-            <label><input type="radio" name="mode" value="steps" checked>
-              jede Datei eine Version zurueck</label>
-          </p>
-          <p style="margin:0 0 8px;">
-            <label><input type="radio" name="mode" value="at" id="mode-at">
-              Stand vom</label>
-            <input type="datetime-local" name="at" id="id_at" style="margin-left:4px;">
-          </p>
-          <input type="submit" value="Pfad wiederherstellen" class="button">
+      <div id="toolbar">
+        <form method="get" id="changelist-search">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <label for="id_storage" style="margin-right:6px;">Storage</label>
+            <select name="storage" id="id_storage">
+              {% for a in aliases %}
+                <option value="{{ a }}" {% if a == alias %}selected{% endif %}>{{ a }}</option>
+              {% endfor %}
+            </select>
+            {% if show != "restorable" %}
+              <input type="hidden" name="show" value="{{ show }}">
+            {% endif %}
+            <label for="searchbar" style="margin:0 6px 0 16px;">Praefix</label>
+            <input type="text" name="prefix" id="searchbar" value="{{ prefix }}"
+                   size="40" placeholder="z.B. netzwerk/photos/  (leer = alles)">
+            <input type="submit" value="Anzeigen">
+          </div>
         </form>
-        <script>
-          (function () {
-            var at = document.getElementById("id_at");
-            if (at) at.addEventListener("input", function () {
-              document.getElementById("mode-at").checked = true;
-            });
-          })();
-        </script>
-      {% else %}
-        <p class="help" style="margin:8px 0 0;">
-          Gib oben einen Praefix an (z.B. <code>netzwerk/photos/</code>) &ndash; ohne
-          Praefix waere das der ganze Bucket, das gibt es hier nicht auf Knopfdruck.
-        </p>
-      {% endif %}
-    </div>
-  {% endif %}
+      </div>
 
-  {% if rows %}
-    <form method="post" action="{{ bulk_url }}" id="bulk-form">
-      {% csrf_token %}
-      <input type="hidden" name="storage" value="{{ alias }}">
-      <input type="hidden" name="prefix" value="{{ prefix }}">
-      <input type="hidden" name="marker" value="{{ marker }}">
-      <input type="hidden" name="show" value="{{ show }}">
+      <p class="help" style="margin:0 0 14px;">
+        Bucket <code>{{ bucket }}</code> &middot; es wird nichts geaendert, solange du
+        keine Version ausdruecklich wiederherstellst.
+      </p>
 
       {% if can_restore %}
-        <div class="actions">
-          <label for="id_action">Aktion:</label>
-          <select name="action" id="id_action">
-            <option value="restore_previous">Vorherige Version wiederherstellen</option>
-          </select>
-          <button type="submit" class="button" id="run-action" disabled>Ausfuehren</button>
-          <span class="action-counter" id="action-counter" style="margin-left:8px;"></span>
-          {% if next_url or prev_url %}
-            <span class="help" style="margin-left:8px;">Die Auswahl gilt nur fuer diese Seite.</span>
+        <div class="module" style="padding:10px 12px;margin-bottom:14px;">
+          <h2>Ganzen Pfad wiederherstellen</h2>
+          {% if prefix %}
+            <form method="post" action="{{ path_url }}" style="margin-top:8px;">
+              {% csrf_token %}
+              <input type="hidden" name="storage" value="{{ alias }}">
+              <input type="hidden" name="prefix" value="{{ prefix }}">
+              <p style="margin:0 0 6px;">
+                Betrifft alle Objekte unter <code>{{ prefix }}</code> &ndash; auch die auf
+                den folgenden Seiten. Geloeschte Dateien kommen dabei zurueck.
+              </p>
+              <p style="margin:0 0 4px;">
+                <label><input type="radio" name="mode" value="steps" checked>
+                  jede Datei eine Version zurueck</label>
+              </p>
+              <p style="margin:0 0 8px;">
+                <label><input type="radio" name="mode" value="at" id="mode-at">
+                  Stand vom</label>
+                <input type="datetime-local" name="at" id="id_at" style="margin-left:4px;">
+              </p>
+              <input type="submit" value="Pfad wiederherstellen" class="button">
+            </form>
+            <script>
+              (function () {
+                var at = document.getElementById("id_at");
+                if (at) at.addEventListener("input", function () {
+                  document.getElementById("mode-at").checked = true;
+                });
+              })();
+            </script>
+          {% else %}
+            <p class="help" style="margin:8px 0 0;">
+              Gib oben einen Praefix an (z.B. <code>netzwerk/photos/</code>) &ndash; ohne
+              Praefix waere das der ganze Bucket, das gibt es hier nicht auf Knopfdruck.
+            </p>
           {% endif %}
         </div>
       {% endif %}
 
-      <div class="results">
-        <table id="result_list">
-          <thead>
-            <tr>
-              {% if can_restore %}
-                <th scope="col" class="action-checkbox-column">
-                  <input type="checkbox" id="action-toggle" aria-label="Alle auswaehlen">
-                </th>
+      {% if rows %}
+        <form method="post" action="{{ bulk_url }}" id="bulk-form">
+          {% csrf_token %}
+          <input type="hidden" name="storage" value="{{ alias }}">
+          <input type="hidden" name="prefix" value="{{ prefix }}">
+          <input type="hidden" name="marker" value="{{ marker }}">
+          <input type="hidden" name="show" value="{{ show }}">
+
+          {% if can_restore %}
+            <div class="actions">
+              <label for="id_action">Aktion:</label>
+              <select name="action" id="id_action">
+                <option value="restore_previous">Vorherige Version wiederherstellen</option>
+              </select>
+              <button type="submit" class="button" id="run-action" disabled>Ausfuehren</button>
+              <span class="action-counter" id="action-counter" style="margin-left:8px;"></span>
+              {% if next_url or prev_url %}
+                <span class="help" style="margin-left:8px;">Die Auswahl gilt nur fuer diese Seite.</span>
               {% endif %}
-              <th scope="col">Objekt</th>
-              <th scope="col">Aktueller Stand</th>
-              <th scope="col">Groesse</th>
-              <th scope="col">Versionen</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for row in rows %}
-              <tr class="{% cycle 'row1' 'row2' %}">
-                {% if can_restore %}
-                  <td class="action-checkbox">
-                    {% if row.restorable %}
-                      <input type="checkbox" name="names" value="{{ row.name }}"
-                             class="action-select" aria-label="{{ row.name }} auswaehlen">
-                    {% endif %}
-                  </td>
-                {% endif %}
-                <th scope="row"><a href="{{ row.url }}">{{ row.name }}</a></th>
-                <td>
-                  {{ row.current.last_modified|date:"d.m.Y H:i:s" }}
-                  {% if row.deleted %}
-                    <span style="color:#ba2121;font-weight:600;">&nbsp;geloescht</span>
+            </div>
+          {% endif %}
+
+          <div class="results">
+            <table id="result_list">
+              <thead>
+                <tr>
+                  {% if can_restore %}
+                    <th scope="col" class="action-checkbox-column">
+                      <input type="checkbox" id="action-toggle" aria-label="Alle auswaehlen">
+                    </th>
                   {% endif %}
-                </td>
-                <td>{% if row.deleted %}&mdash;{% else %}{{ row.current.size|filesizeformat }}{% endif %}</td>
-                <td>{{ row.count }}</td>
-              </tr>
+                  <th scope="col">Objekt</th>
+                  <th scope="col">Aktueller Stand</th>
+                  <th scope="col">Groesse</th>
+                  <th scope="col">Versionen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in rows %}
+                  <tr class="{% cycle 'row1' 'row2' %}">
+                    {% if can_restore %}
+                      <td class="action-checkbox">
+                        {% if row.restorable %}
+                          <input type="checkbox" name="names" value="{{ row.name }}"
+                                 class="action-select" aria-label="{{ row.name }} auswaehlen">
+                        {% endif %}
+                      </td>
+                    {% endif %}
+                    <th scope="row"><a href="{{ row.url }}">{{ row.name }}</a></th>
+                    <td>
+                      {{ row.current.last_modified|date:"d.m.Y H:i:s" }}
+                      {% if row.deleted %}
+                        <span style="color:#ba2121;font-weight:600;">&nbsp;geloescht</span>
+                      {% endif %}
+                    </td>
+                    <td>{% if row.deleted %}&mdash;{% else %}{{ row.current.size|filesizeformat }}{% endif %}</td>
+                    <td>{{ row.count }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+
+          <p class="paginator">
+            {% if prev_url %}
+              <a href="{{ first_url }}">&laquo; Erste</a>
+              <a href="{{ prev_url }}">&lsaquo; Zurueck</a>
+            {% endif %}
+            <span class="this-page">Seite {{ page_number }}</span>
+            {% if next_url %}
+              <a href="{{ next_url }}">Weiter &rsaquo;</a>
+            {% endif %}
+            <span class="help" style="margin-left:8px;">
+              {{ rows|length }} Objekt{{ rows|length|pluralize:"e" }} auf dieser Seite
+              {% if not next_url %}&middot; Ende der Liste{% endif %}
+            </span>
+          </p>
+        </form>
+
+        {% if hidden or hidden_deleted %}
+          <p class="help">
+            {% if hidden %}
+              {{ hidden }} Objekt{{ hidden|pluralize:"e" }} mit nur einer Version
+              ausgeblendet &ndash; dort gibt es nichts zurueckzuholen.
+            {% endif %}
+            {% if hidden_deleted %}
+              {{ hidden_deleted }} geloeschte Datei{{ hidden_deleted|pluralize:"en" }}
+              ausgeblendet.
+            {% endif %}
+          </p>
+        {% endif %}
+        {% if show == "deleted" %}
+          <p class="help">
+            Nur geloeschte Dateien &ndash; {{ scanned }} Objekt{{ scanned|pluralize:"e" }}
+            dafuer durchsucht{% if scan_capped %}, danach abgebrochen: &bdquo;Weiter&ldquo;
+            sucht ab dieser Stelle weiter{% endif %}.
+          </p>
+        {% endif %}
+        {% if not can_restore %}
+          <p class="help">Dir fehlt das Recht <code>s3restore.restore_s3version</code>
+            &ndash; nur Ansicht.</p>
+        {% endif %}
+
+        {% if can_restore %}
+          <script>
+            (function () {
+              var form = document.getElementById("bulk-form");
+              var toggle = document.getElementById("action-toggle");
+              var button = document.getElementById("run-action");
+              var counter = document.getElementById("action-counter");
+              var boxes = form.querySelectorAll("input.action-select");
+
+              function update() {
+                var n = form.querySelectorAll("input.action-select:checked").length;
+                button.disabled = n === 0;
+                counter.textContent = n ? n + " von " + boxes.length + " ausgewaehlt" : "";
+                toggle.checked = n === boxes.length && n > 0;
+                toggle.indeterminate = n > 0 && n < boxes.length;
+              }
+
+              toggle.addEventListener("change", function () {
+                boxes.forEach(function (b) { b.checked = toggle.checked; });
+                update();
+              });
+              boxes.forEach(function (b) { b.addEventListener("change", update); });
+              update();
+            })();
+          </script>
+        {% endif %}
+      {% else %}
+        {% if show == "deleted" %}
+          <p class="help">
+            Keine geloeschten Dateien gefunden &ndash; {{ scanned }} Objekt{{ scanned|pluralize:"e" }}
+            durchsucht{% if scan_capped %}, danach abgebrochen{% endif %}.
+          </p>
+        {% elif hidden or hidden_deleted %}
+          <p class="help">
+            Auf dieser Seite bleibt nach dem Filter nichts uebrig
+            ({{ hidden }} ohne aeltere Version{% if hidden_deleted %},
+            {{ hidden_deleted }} geloescht{% endif %} ausgeblendet).
+          </p>
+        {% else %}
+          <p class="help">Keine Objekte unter diesem Praefix gefunden.</p>
+        {% endif %}
+        {% if next_url or prev_url %}
+          <p class="paginator">
+            {% if prev_url %}
+              <a href="{{ first_url }}">&laquo; Erste</a>
+              <a href="{{ prev_url }}">&lsaquo; Zurueck</a>
+            {% endif %}
+            <span class="this-page">Seite {{ page_number }}</span>
+            {% if next_url %}<a href="{{ next_url }}">Weiter &rsaquo;</a>{% endif %}
+          </p>
+        {% endif %}
+      {% endif %}
+
+    </div>{# /changelist-form-container #}
+
+    {% if filters %}
+      <nav id="changelist-filter" aria-labelledby="changelist-filter-header">
+        <h2 id="changelist-filter-header">Filter</h2>
+        <details data-filter-title="Zustand" open>
+          <summary>Nach Zustand</summary>
+          <ul>
+            {% for f in filters %}
+              <li{% if f.active %} class="selected"{% endif %}>
+                <a href="{{ f.url }}">{{ f.label }}</a>
+              </li>
             {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      <p class="paginator">
-        {% if prev_url %}
-          <a href="{{ first_url }}">&laquo; Erste</a>
-          <a href="{{ prev_url }}">&lsaquo; Zurueck</a>
-        {% endif %}
-        <span class="this-page">Seite {{ page_number }}</span>
-        {% if next_url %}
-          <a href="{{ next_url }}">Weiter &rsaquo;</a>
-        {% endif %}
-        <span class="help" style="margin-left:8px;">
-          {{ rows|length }} Objekt{{ rows|length|pluralize:"e" }} auf dieser Seite
-          {% if not next_url %}&middot; Ende der Liste{% endif %}
-        </span>
-      </p>
-    </form>
-
-    {% if hidden or hidden_deleted %}
-      <p class="help">
-        {% if hidden %}
-          {{ hidden }} Objekt{{ hidden|pluralize:"e" }} mit nur einer Version
-          ausgeblendet &ndash; dort gibt es nichts zurueckzuholen.
-        {% endif %}
-        {% if hidden_deleted %}
-          {{ hidden_deleted }} geloeschte Datei{{ hidden_deleted|pluralize:"en" }}
-          ausgeblendet.
-        {% endif %}
-      </p>
+          </ul>
+        </details>
+      </nav>
     {% endif %}
-    {% if show == "deleted" %}
-      <p class="help">
-        Nur geloeschte Dateien &ndash; {{ scanned }} Objekt{{ scanned|pluralize:"e" }}
-        dafuer durchsucht{% if scan_capped %}, danach abgebrochen: &bdquo;Weiter&ldquo;
-        sucht ab dieser Stelle weiter{% endif %}.
-      </p>
-    {% endif %}
-    {% if not can_restore %}
-      <p class="help">Dir fehlt das Recht <code>s3restore.restore_s3version</code>
-        &ndash; nur Ansicht.</p>
-    {% endif %}
-
-    {% if can_restore %}
-      <script>
-        (function () {
-          var form = document.getElementById("bulk-form");
-          var toggle = document.getElementById("action-toggle");
-          var button = document.getElementById("run-action");
-          var counter = document.getElementById("action-counter");
-          var boxes = form.querySelectorAll("input.action-select");
-
-          function update() {
-            var n = form.querySelectorAll("input.action-select:checked").length;
-            button.disabled = n === 0;
-            counter.textContent = n ? n + " von " + boxes.length + " ausgewaehlt" : "";
-            toggle.checked = n === boxes.length && n > 0;
-            toggle.indeterminate = n > 0 && n < boxes.length;
-          }
-
-          toggle.addEventListener("change", function () {
-            boxes.forEach(function (b) { b.checked = toggle.checked; });
-            update();
-          });
-          boxes.forEach(function (b) { b.addEventListener("change", update); });
-          update();
-        })();
-      </script>
-    {% endif %}
-  {% else %}
-    {% if show == "deleted" %}
-      <p class="help">
-        Keine geloeschten Dateien gefunden &ndash; {{ scanned }} Objekt{{ scanned|pluralize:"e" }}
-        durchsucht{% if scan_capped %}, danach abgebrochen{% endif %}.
-      </p>
-    {% elif hidden %}
-      <p class="help">
-        Auf dieser Seite hat kein Objekt eine aeltere Version
-        ({{ hidden }} ausgeblendet, siehe Filter &bdquo;Alle&ldquo;).
-      </p>
-    {% else %}
-      <p class="help">Keine Objekte unter diesem Praefix gefunden.</p>
-    {% endif %}
-    {% if next_url or prev_url %}
-      <p class="paginator">
-        {% if prev_url %}
-          <a href="{{ first_url }}">&laquo; Erste</a>
-          <a href="{{ prev_url }}">&lsaquo; Zurueck</a>
-        {% endif %}
-        <span class="this-page">Seite {{ page_number }}</span>
-        {% if next_url %}<a href="{{ next_url }}">Weiter &rsaquo;</a>{% endif %}
-      </p>
-    {% endif %}
-  {% endif %}
+  </div>{# /changelist #}
 
   {% endif %}
 </div>

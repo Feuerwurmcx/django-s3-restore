@@ -702,7 +702,7 @@ def test_deleted_file_with_one_version_stays_visible(storage, admin_client):
 def test_page_with_only_single_version_files_keeps_navigation(storage, admin_client):
     put(storage, "einzig", "config/eine.json")
     body = flat(admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode())
-    assert "kein Objekt eine aeltere Version" in body
+    assert "bleibt nach dem Filter nichts uebrig" in body
     assert "Keine Objekte unter diesem Praefix gefunden" not in body
 
 
@@ -835,3 +835,21 @@ def test_live_filter_survives_paging_and_bulk(storage, admin_client):
                                     "confirm": "yes", "names": ["config/a.json"]})
     assert "show=live" in resp["Location"]
     assert read(storage, "config/a.json") == "alt"
+
+
+def test_filters_use_admin_sidebar_markup(storage, admin_client):
+    """Die Filter sollen in der gewohnten Admin-Leiste rechts stehen."""
+    put(storage, "v1", "config/a.json"); put(storage, "v2", "config/a.json")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    assert 'id="changelist-filter"' in body
+    assert 'id="changelist" class="module filtered"' in body
+    assert 'class="changelist-form-container"' in body
+    assert '<li class="selected">' in body            # aktiver Filter markiert
+    assert "Nach Zustand" in body
+
+
+def test_prefix_form_keeps_active_filter(storage, admin_client):
+    put(storage, "v1", "config/a.json"); put(storage, "v2", "config/a.json")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "show": "live"}).content.decode()
+    assert '<input type="hidden" name="show" value="live">' in body
