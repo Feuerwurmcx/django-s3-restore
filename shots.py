@@ -96,6 +96,10 @@ def test_make_screenshots(live_server):
                       "?prefix=netzwerk/&show=deleted")
             page.wait_for_load_state("networkidle")
             page.screenshot(path=f"{IMG}/filter-geloescht.png", full_page=True)
+            page.goto(f"{live_server.url}/admin/s3restore/s3version/"
+                      "?prefix=netzwerk/&show=live")
+            page.wait_for_load_state("networkidle")
+            page.screenshot(path=f"{IMG}/filter-ohne-geloeschte.png", full_page=True)
 
             # 7: Blaettern -- 120 Dateien unter einem zweiten Praefix
             for i in range(120):

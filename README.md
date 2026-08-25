@@ -95,15 +95,21 @@ Sammelaktion landest du wieder auf derselben Seite.
 
 ### Filter
 
-Über der Liste stehen drei Filter:
+Über der Liste stehen vier Filter:
 
 | Filter | Zeigt |
 |---|---|
 | **Wiederherstellbar** (Standard) | alles, wo es eine ältere Version gibt |
+| **Ohne gelöschte** | dasselbe, aber ohne Dateien im gelöschten Zustand |
 | **Nur gelöschte** | Dateien, deren aktueller Stand ein Delete-Marker ist |
 | **Alle** | zusätzlich Dateien mit nur einer Version, dann ohne Checkbox |
 
 ![Filter „nur gelöschte"](docs/img/filter-geloescht.png)
+
+![Filter „ohne gelöschte"](docs/img/filter-ohne-geloeschte.png)
+
+Unter der Liste steht jeweils, was der Filter weggenommen hat – gelöschte Dateien
+und solche ohne ältere Version werden getrennt gezählt.
 
 Dateien mit nur einer Version fallen im Standardfilter raus – dort gibt es nichts
 zurückzuholen; eine Zeile unter der Liste sagt, wie viele das waren. Gelöschte
@@ -235,7 +241,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-114 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
+118 Tests gegen einen mit [moto](https://github.com/getmoto/moto) gemockten
 S3-Bucket – kein echtes AWS, keine Credentials nötig.
 
 Die Screenshots oben stammen aus einem Playwright-Durchlauf gegen genau diesen

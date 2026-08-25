@@ -131,7 +131,7 @@ class S3VersionAdmin(admin.ModelAdmin):
         marker = request.GET.get("marker", "").strip()
         show = self._show_mode(request)
         rows, next_marker, page_number, prev_marker = [], None, 1, None
-        hidden, scanned, scan_capped = 0, 0, False
+        hidden, hidden_deleted, scanned, scan_capped = 0, 0, 0, False
         if alias:
             storage = _get_storage(alias)
             try:
@@ -141,8 +141,8 @@ class S3VersionAdmin(admin.ModelAdmin):
                     rows, next_marker, scanned, scan_capped = self._scan_deleted(
                         storage, alias, prefix, marker)
                 else:
-                    rows, next_marker, hidden = self._page_rows(
-                        storage, alias, prefix, marker, show == "all")
+                    rows, next_marker, hidden, hidden_deleted = self._page_rows(
+                        storage, alias, prefix, marker, show)
             except RestoreError as exc:
                 self.message_user(request, str(exc), messages.ERROR)
 
@@ -167,12 +167,14 @@ class S3VersionAdmin(admin.ModelAdmin):
                          if next_marker else ""),
             "show": show,
             "hidden": hidden,
+            "hidden_deleted": hidden_deleted,
             "scanned": scanned,
             "scan_capped": scan_capped,
             "filters": [
                 {"key": key, "label": label, "active": show == key,
                  "url": self._changelist_url(alias, prefix, None, key)}
                 for key, label in (("restorable", "Wiederherstellbar"),
+                                   ("live", "Ohne geloeschte"),
                                    ("deleted", "Nur geloeschte"),
                                    ("all", "Alle"))
             ] if alias else [],
@@ -549,26 +551,32 @@ class S3VersionAdmin(admin.ModelAdmin):
     def _show_mode(request) -> str:
         """Welcher Filter ist aktiv: restorable (Standard), deleted oder all."""
         wanted = request.GET.get("show", "").strip()
-        if wanted in ("restorable", "deleted", "all"):
+        if wanted in ("restorable", "live", "deleted", "all"):
             return wanted
         if request.GET.get("all") == "1":       # alte Links bleiben gueltig
             return "all"
         return "restorable"
 
-    def _page_rows(self, storage, alias, prefix, marker, show_all):
-        """Eine Seite ab dem Marker; ohne show_all fliegen Dateien ohne
-        aeltere Version raus (dort gibt es nichts zurueckzuholen)."""
+    def _page_rows(self, storage, alias, prefix, marker, show):
+        """Eine Seite ab dem Marker, gefiltert nach dem gewaehlten Modus.
+
+        Gezaehlt wird, was der Filter wegnimmt: Dateien ohne aeltere Version
+        (dort gibt es nichts zurueckzuholen) und -- im Modus "live" --
+        geloeschte Dateien.
+        """
         grouped, next_marker = storage.page_under(
             prefix, key_marker=marker or None, limit=PAGE_SIZE)
-        rows, hidden = [], 0
+        rows, hidden, hidden_deleted = [], 0, 0
         for name, history in grouped.items():
             row = self._row(storage, alias, name, history)
-            if not row["restorable"]:
+            if not row["restorable"] and show != "all":
                 hidden += 1
-                if not show_all:
-                    continue
+                continue
+            if row["deleted"] and show == "live":
+                hidden_deleted += 1
+                continue
             rows.append(row)
-        return rows, next_marker, hidden
+        return rows, next_marker, hidden, hidden_deleted
 
     def _scan_deleted(self, storage, alias, prefix, marker):
         """Sucht vorwaerts nach geloeschten Dateien, bis die Seite voll ist.

@@ -794,3 +794,44 @@ def test_old_all_parameter_still_works(storage, admin_client):
     put(storage, "einzig", "config/eine.json")
     body = admin_client.get(CHANGELIST, {"prefix": "config/", "all": "1"}).content.decode()
     assert "config/eine.json" in body
+
+
+def test_live_filter_hides_deleted(storage, admin_client):
+    put(storage, "lebt", "config/a.json"); put(storage, "lebt2", "config/a.json")
+    put(storage, "weg", "config/b.json"); put(storage, "weg2", "config/b.json")
+    storage.delete("config/b.json")
+
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "show": "live"}).content.decode()
+    assert "config/a.json" in body and "config/b.json" not in body
+    assert "1 geloeschte Datei ausgeblendet" in flat(body)
+    assert "Ohne geloeschte" in body
+
+
+def test_live_filter_still_hides_single_version_files(storage, admin_client):
+    put(storage, "lebt", "config/a.json"); put(storage, "lebt2", "config/a.json")
+    put(storage, "einzig", "config/eine.json")
+    body = flat(admin_client.get(CHANGELIST, {"prefix": "config/",
+                                              "show": "live"}).content.decode())
+    assert "config/eine.json" not in body
+    assert "1 Objekt mit nur einer Version ausgeblendet" in body
+
+
+def test_all_four_filters_are_offered(storage, admin_client):
+    put(storage, "v1", "config/a.json"); put(storage, "v2", "config/a.json")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/"}).content.decode()
+    for key in ("show=live", "show=deleted", "show=all"):
+        assert key in body
+    assert "Ohne geloeschte" in body and "Nur geloeschte" in body
+
+
+def test_live_filter_survives_paging_and_bulk(storage, admin_client):
+    put(storage, "alt", "config/a.json"); put(storage, "neu", "config/a.json")
+    body = admin_client.get(CHANGELIST, {"prefix": "config/",
+                                         "show": "live"}).content.decode()
+    assert 'name="show" value="live"' in body
+    resp = admin_client.post(BULK, {"storage": "default", "prefix": "config/",
+                                    "show": "live", "action": "restore_previous",
+                                    "confirm": "yes", "names": ["config/a.json"]})
+    assert "show=live" in resp["Location"]
+    assert read(storage, "config/a.json") == "alt"

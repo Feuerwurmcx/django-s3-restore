@@ -165,10 +165,16 @@
       </p>
     </form>
 
-    {% if hidden %}
+    {% if hidden or hidden_deleted %}
       <p class="help">
-        {{ hidden }} Objekt{{ hidden|pluralize:"e" }} mit nur einer Version
-        ausgeblendet &ndash; dort gibt es nichts zurueckzuholen.
+        {% if hidden %}
+          {{ hidden }} Objekt{{ hidden|pluralize:"e" }} mit nur einer Version
+          ausgeblendet &ndash; dort gibt es nichts zurueckzuholen.
+        {% endif %}
+        {% if hidden_deleted %}
+          {{ hidden_deleted }} geloeschte Datei{{ hidden_deleted|pluralize:"en" }}
+          ausgeblendet.
+        {% endif %}
       </p>
     {% endif %}
     {% if show == "deleted" %}
