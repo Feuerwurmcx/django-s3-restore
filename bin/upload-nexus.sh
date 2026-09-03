@@ -4,8 +4,13 @@
 #   NEXUS_URL=https://nexus.example.com NEXUS_REPO=python-raw \
 #   NEXUS_USER=... NEXUS_PASS=... ci/upload-nexus.sh <archiv> <paket> <version>
 #
+# Die Zugangsdaten werden curl über stdin (--config -) übergeben, nicht über
+# --user: sonst stünden sie in der Prozessliste und wären für jeden anderen
+# Prozess auf dem Agent per `ps aux` lesbar.
+#
 # Bricht ab, wenn die Version dort schon liegt (ALLOW_REDEPLOY=1 überschreibt).
 set -euo pipefail
+set +x            # Schutz davor, dass ein aufrufendes Skript xtrace vererbt
 
 ARCHIVE="${1:?archiv fehlt}"
 PKG="${2:?paket fehlt}"
@@ -18,10 +23,18 @@ VERSION="${3:?version fehlt}"
 
 TARGET="${NEXUS_URL%/}/repository/${NEXUS_REPO}/${PKG}/${VERSION}/$(basename "$ARCHIVE")"
 
+# curl-config-Format: Wert in Anführungszeichen, \ und " müssen escaped werden
+cfg_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
+# Auth ausschliesslich über stdin -> nie in argv, nie im Build-Log
+curl_auth() {
+  printf 'user = "%s:%s"\n' "$(cfg_escape "$NEXUS_USER")" "$(cfg_escape "$NEXUS_PASS")" \
+    | curl --config - "$@"
+}
+
 exists() {
   local code
-  code=$(curl --silent --head --output /dev/null --write-out '%{http_code}' \
-              --user "${NEXUS_USER}:${NEXUS_PASS}" "$TARGET")
+  code=$(curl_auth --silent --head --output /dev/null --write-out '%{http_code}' "$TARGET")
   [[ "$code" == "200" ]]
 }
 
@@ -35,9 +48,8 @@ if [[ "${ALLOW_REDEPLOY:-0}" != "1" ]] && exists; then
 fi
 
 echo "Upload -> ${TARGET}"
-HTTP_CODE=$(curl --fail-with-body --silent --show-error \
+HTTP_CODE=$(curl_auth --fail-with-body --silent --show-error \
   --retry 3 --retry-delay 5 --retry-connrefused \
-  --user "${NEXUS_USER}:${NEXUS_PASS}" \
   --upload-file "$ARCHIVE" \
   --write-out '%{http_code}' \
   --output /dev/null \
