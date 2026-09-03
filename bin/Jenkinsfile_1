@@ -1,0 +1,102 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        booleanParam(name: 'BUILD_ALL', defaultValue: false,
+                     description: 'Alle Pakete bauen statt nur der geänderten')
+        booleanParam(name: 'SKIP_UPLOAD', defaultValue: false,
+                     description: 'Nur packen, kein Nexus-Upload (Dry-Run)')
+        booleanParam(name: 'ALLOW_REDEPLOY', defaultValue: false,
+                     description: 'Bereits vorhandene Version in Nexus überschreiben')
+    }
+
+    environment {
+        NEXUS_URL  = 'https://nexus.example.com'
+        NEXUS_REPO = 'python-raw'
+        NEXUS_CRED = credentials('nexus-raw-deploy')   // Username/Password-Credential in Jenkins
+    }
+
+    stages {
+
+        stage('Setup') {
+            steps {
+                script {
+                    // Basis für den Diff: letzter erfolgreicher Build (Git-Plugin setzt das),
+                    // sonst HEAD~1, sonst leer -> alles bauen
+                    def base = params.BUILD_ALL ? '' :
+                        (env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: sh(returnStdout: true, script:
+                            'git rev-parse HEAD~1 2>/dev/null || true').trim())
+
+                    def out = sh(returnStdout: true, script: "bash ci/changed-packages.sh '${base}'").trim()
+                    env.CHANGED = out
+                    def pkgs = out ? out.split('\n') as List : []
+
+                    echo "Basis   : ${base ?: '(keine – alles)'}"
+                    echo "Pakete  : ${pkgs.join(', ') ?: '(keine Änderungen)'}"
+
+                    if (pkgs.isEmpty()) {
+                        currentBuild.result = 'SUCCESS'
+                        currentBuild.description = 'keine Paketänderungen'
+                    } else {
+                        currentBuild.description = "${pkgs.size()} Paket(e): ${pkgs.join(', ')}"
+                    }
+                }
+            }
+        }
+
+        stage('Pack & Publish') {
+            when { expression { env.CHANGED?.trim() } }
+            steps {
+                script {
+                    def pkgs = env.CHANGED.trim().split('\n') as List
+                    def versions = [:]   // CPS-Branches laufen kooperativ, kein Sync nötig
+
+                    parallel pkgs.collectEntries { pkg ->
+                        [ (pkg): {
+                            stage(pkg) {
+                                // Version kommt aus dem Paket selbst (setup.py / setup.cfg)
+                                def version = sh(returnStdout: true,
+                                    script: "bash ci/version-of.sh '${pkg}'").trim()
+                                echo "${pkg}: Version ${version}"
+
+                                def archive = sh(returnStdout: true,
+                                    script: "bash ci/pack.sh '${pkg}' '${version}'").trim()
+
+                                if (params.SKIP_UPLOAD) {
+                                    echo "SKIP_UPLOAD gesetzt – ${archive} nicht hochgeladen"
+                                } else {
+                                    withEnv([
+                                        "NEXUS_USER=${env.NEXUS_CRED_USR}",
+                                        "NEXUS_PASS=${env.NEXUS_CRED_PSW}",
+                                        "ALLOW_REDEPLOY=${params.ALLOW_REDEPLOY ? '1' : '0'}"
+                                    ]) {
+                                        sh "bash ci/upload-nexus.sh '${archive}' '${pkg}' '${version}'"
+                                    }
+                                }
+                                versions[pkg] = version
+                            }
+                        }]
+                    }
+
+                    currentBuild.description = versions.sort()
+                        .collect { k, v -> "${k} ${v}" }.join(', ')
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'dist/*.tar.gz', allowEmptyArchive: true, fingerprint: true
+        }
+        cleanup {
+            sh 'rm -rf dist'
+        }
+    }
+}
