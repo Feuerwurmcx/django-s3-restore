@@ -1,0 +1,102 @@
+// Jenkinsfile im PAKET-Repo – die Skripte kommen aus der Shared Library.
+// Version pinnen: @Library('ci-shared@v1.0.0'), nicht @master.
+@Library('ci-shared@v1.0.0') _
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        booleanParam(name: 'BUILD_ALL', defaultValue: false,
+                     description: 'Alle Pakete bauen statt nur der geänderten')
+        booleanParam(name: 'SKIP_UPLOAD', defaultValue: false,
+                     description: 'Nur packen, kein Nexus-Upload (Dry-Run)')
+        booleanParam(name: 'ALLOW_REDEPLOY', defaultValue: false,
+                     description: 'Bereits vorhandene Version in Nexus überschreiben')
+    }
+
+    environment {
+        NEXUS_URL     = 'https://nexus.example.com'
+        NEXUS_REPO    = 'python-raw'
+        NEXUS_CRED_ID = 'nexus-raw-deploy'
+    }
+
+    stages {
+
+        stage('Setup') {
+            steps {
+                script {
+                    // Skripte einmal aus resources/ in den Workspace schreiben.
+                    // NICHT im parallel-Block: die Branches würden dieselben
+                    // Dateien gleichzeitig überschreiben.
+                    pyMonorepo.install()
+
+                    def base = params.BUILD_ALL ? '' :
+                        (env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: sh(returnStdout: true, script:
+                            'git rev-parse HEAD~1 2>/dev/null || true').trim())
+
+                    def pkgs = pyMonorepo.changedPackages(base)
+                    env.CHANGED = pkgs.join('\n')
+
+                    echo "Basis   : ${base ?: '(keine – alles)'}"
+                    echo "Pakete  : ${pkgs.join(', ') ?: '(keine Änderungen)'}"
+                    currentBuild.description = pkgs ? "${pkgs.size()} Paket(e): ${pkgs.join(', ')}"
+                                                   : 'keine Paketänderungen'
+                }
+            }
+        }
+
+        stage('Pack & Publish') {
+            when { expression { env.CHANGED?.trim() } }
+            steps {
+                script {
+                    def pkgs = env.CHANGED.trim().split('\n') as List
+                    def versions = [:]   // CPS-Branches laufen kooperativ, kein Sync nötig
+
+                    parallel pkgs.collectEntries { pkg ->
+                        [ (pkg): {
+                            stage(pkg) {
+                                def version = pyMonorepo.versionOf(pkg)
+                                echo "${pkg}: Version ${version}"
+
+                                def archive = pyMonorepo.pack(pkg, version)
+
+                                if (params.SKIP_UPLOAD) {
+                                    echo "SKIP_UPLOAD gesetzt – ${archive} nicht hochgeladen"
+                                } else {
+                                    pyMonorepo.publish(
+                                        archive:       archive,
+                                        pkg:           pkg,
+                                        version:       version,
+                                        url:           env.NEXUS_URL,
+                                        repo:          env.NEXUS_REPO,
+                                        credentialsId: env.NEXUS_CRED_ID,
+                                        allowRedeploy: params.ALLOW_REDEPLOY
+                                    )
+                                }
+                                versions[pkg] = version
+                            }
+                        }]
+                    }
+
+                    currentBuild.description = versions.sort()
+                        .collect { k, v -> "${k} ${v}" }.join(', ')
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'dist/*.tar.gz', allowEmptyArchive: true, fingerprint: true
+        }
+        cleanup {
+            sh 'rm -rf dist .ci-lib'
+        }
+    }
+}
